@@ -221,6 +221,14 @@
 
     <script>
         function showTab(tabId) {
+            if (tabId === 'settings') {
+                // 如果是手动点击导航栏进入设置，则视为“创建新磁盘”，重置表单状态
+                // 除非是从 editDisk 函数触发的
+                const diskNameInput = document.getElementById('disk_name');
+                if (diskNameInput && !diskNameInput.disabled) {
+                    resetSettingsForm();
+                }
+            }
             // Hide all contents
             document.querySelectorAll('.tab-content').forEach(tab => {
                 tab.classList.remove('active');
@@ -239,6 +247,7 @@
         const API_BASE = window.location.origin;
 
         async function saveConfig() {
+            // 获取表单值时，即使 disabled 也要获取值（或者从原始对象获取）
             const config = {
                 dav_url: document.getElementById('dav_url').value,
                 dav_user: document.getElementById('dav_user').value,
@@ -385,9 +394,41 @@
                          document.getElementById('disk_size_gb').value = disk.config.disk_size_gb;
                          document.getElementById('max_cache_gb').value = disk.config.max_cache_gb;
                          document.getElementById('concurrency').value = disk.config.concurrency || 5;
+                         
+                         // 锁定不可更改的属性
+                         const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb'];
+                         lockedFields.forEach(id => {
+                             const el = document.getElementById(id);
+                             if (el) {
+                                 el.disabled = true;
+                                 el.classList.add('bg-slate-50', 'text-slate-500', 'cursor-not-allowed');
+                                 el.title = "磁盘创建后，此项不可修改（修改会导致数据损坏）";
+                             }
+                         });
+                         
+                         // 修改保存按钮文字
+                         const saveBtn = document.querySelector('button[onclick="saveConfig()"]');
+                         if (saveBtn) saveBtn.textContent = "更新配置";
+                         
                          showTab('settings');
                      }
                  });
+         }
+
+         function resetSettingsForm() {
+             // 重置表单并解锁字段
+             const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb'];
+             lockedFields.forEach(id => {
+                 const el = document.getElementById(id);
+                 if (el) {
+                     el.disabled = false;
+                     el.classList.remove('bg-slate-50', 'text-slate-500', 'cursor-not-allowed');
+                     el.title = "";
+                 }
+             });
+             const saveBtn = document.querySelector('button[onclick="saveConfig()"]');
+             if (saveBtn) saveBtn.textContent = "保存并创建磁盘";
+             // 清空或恢复默认值（可选）
          }
 
         async function unmountDisk(name) {

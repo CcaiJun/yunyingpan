@@ -50,6 +50,9 @@ class DiskInstance:
         self.status = "stopped" # stopped, starting, running, error
         self.error_msg = ""
         self.final_mountpoint = f"/mnt/v_disks/{config.disk_name}"
+        self.cache_usage_bytes = 0
+        self.loop_status = "unmounted"
+        self.upload_queue_size = 0
 
 def load_configs() -> List[dict]:
     if os.path.exists(CONFIG_FILE):
@@ -64,6 +67,116 @@ def save_configs(configs: List[dict]):
     with open(CONFIG_FILE, 'w') as f:
         json.dump(configs, f, indent=4)
 
+def do_mount(inst: DiskInstance):
+    if inst.status == "starting":
+        return
+    
+    inst.status = "starting"
+    inst.error_msg = ""
+    
+    try:
+        cfg = inst.config
+        # 0. 预清理：如果挂载路径已存在且是挂载点，尝试先卸载
+        import subprocess
+        logger.info(f"Pre-cleaning mount paths for {cfg.disk_name}")
+        try:
+            # 卸载 loop 挂载点
+            subprocess.run(['umount', '-l', inst.final_mountpoint], check=False, capture_output=True)
+            # 卸载 FUSE 挂载点
+            subprocess.run(['fusermount3', '-u', cfg.mount_path], check=False, capture_output=True)
+            subprocess.run(['umount', '-l', cfg.mount_path], check=False, capture_output=True)
+            # 确保目录存在
+            os.makedirs(cfg.mount_path, exist_ok=True)
+            os.makedirs(inst.final_mountpoint, exist_ok=True)
+        except Exception as e:
+            logger.warning(f"Cleanup failed (non-critical): {e}")
+
+        # 1. 启动 FUSE 层
+        logger.info(f"Starting FUSE layer for {cfg.disk_name} at {cfg.mount_path}")
+        inst.vdrive = VDrive(
+            dav_url=cfg.dav_url, 
+            dav_user=cfg.dav_user, 
+            dav_password=cfg.dav_password, 
+            cache_dir=cfg.cache_dir, 
+            disk_size_gb=cfg.disk_size_gb,
+            max_cache_size_gb=cfg.max_cache_gb,
+            block_size_mb=cfg.block_size_mb,
+            img_name=cfg.disk_name,
+            remote_path=cfg.remote_path,
+            concurrency=cfg.concurrency
+        )
+
+        def start_fuse():
+            try:
+                FUSE(inst.vdrive, cfg.mount_path, foreground=True, nonempty=True, allow_other=True, direct_io=True)
+            except Exception as fuse_err:
+                logger.error(f"FUSE process exited with error: {fuse_err}")
+            finally:
+                logger.info(f"FUSE process for {cfg.disk_name} stopped")
+                # 如果不是人为停止的，标记为错误
+                if inst.status != "stopped":
+                    inst.status = "error"
+                    inst.error_msg = "FUSE 进程异常退出"
+
+        inst.thread = threading.Thread(target=start_fuse, daemon=True)
+        inst.thread.start()
+
+        # 2. 等待镜像并挂载 Loop
+        img_name = cfg.disk_name if cfg.disk_name.endswith('.img') else f"{cfg.disk_name}.img"
+        img_path = os.path.join(cfg.mount_path, img_name)
+        logger.info(f"Waiting for image file: {img_path}")
+
+        import time
+        max_wait = 60
+        while not os.path.exists(img_path) and max_wait > 0:
+            if inst.status == "error": # FUSE 启动失败
+                return
+            time.sleep(1)
+            max_wait -= 1
+
+        if not os.path.exists(img_path):
+            logger.error(f"Image file {img_path} not found after 60s")
+            raise Exception("FUSE镜像未能按时生成")
+
+        logger.info(f"Image file found, preparing loop mount at {inst.final_mountpoint}")
+        os.makedirs(inst.final_mountpoint, exist_ok=True)
+        
+        # 检查格式化
+        needs_format = True
+        try:
+            # 使用 blkid 检查是否有文件系统
+            res = subprocess.run(['blkid', img_path], capture_output=True, text=True)
+            if "TYPE=" in res.stdout:
+                needs_format = False
+                logger.info(f"Disk {cfg.disk_name} already formatted, skipping mkfs.")
+        except Exception as e: 
+            logger.error(f"Error during format check: {e}")
+
+        if needs_format:
+            logger.info(f"Formatting disk {cfg.disk_name}...")
+            subprocess.run(['mkfs.ext4', '-F', '-E', 'lazy_itable_init=1,lazy_journal_init=1', img_path], check=True)
+
+        logger.info(f"Final loop mount: {img_path} -> {inst.final_mountpoint}")
+        try:
+            subprocess.run(['mount', '-o', 'loop', img_path, inst.final_mountpoint], check=True)
+        except subprocess.CalledProcessError as e:
+            if "Structure needs cleaning" in str(e) or e.returncode == 32:
+                logger.warning(f"Disk {cfg.disk_name} filesystem corrupted, attempting repair...")
+                subprocess.run(['e2fsck', '-y', img_path], check=False)
+                # 再次尝试挂载
+                subprocess.run(['mount', '-o', 'loop', img_path, inst.final_mountpoint], check=True)
+            else:
+                raise e
+        
+        inst.status = "running"
+        inst.error_msg = ""
+        logger.info(f"Disk {cfg.disk_name} mounted successfully at {inst.final_mountpoint}")
+
+    except Exception as e:
+        inst.status = "error"
+        inst.error_msg = str(e)
+        logger.error(f"Mount disk {inst.config.disk_name} failed: {e}")
+
 # 全局管理
 disks: Dict[str, DiskInstance] = {}
 
@@ -75,8 +188,20 @@ for cfg_dict in load_configs():
         
         # 自动检测是否已经在运行
         if os.path.ismount(instance.final_mountpoint):
-            instance.status = "running"
-            logger.info(f"Detected existing mount for disk {cfg.disk_name}, setting status to running")
+            # 检查 FUSE 挂载点是否正常
+            try:
+                os.stat(instance.config.mount_path)
+                instance.status = "running"
+                logger.info(f"Detected existing healthy mount for disk {cfg.disk_name}, setting status to running")
+            except:
+                logger.warning(f"Detected broken FUSE mount for disk {cfg.disk_name}, setting status to error")
+                instance.status = "error"
+                instance.error_msg = "FUSE 层连接断开 (Transport endpoint not connected)"
+        elif os.path.ismount(instance.config.mount_path):
+            # FUSE 还在但 Loop 不在，可能是异常退出
+            logger.warning(f"Detected partial mount for disk {cfg.disk_name} (FUSE ok, Loop missing)")
+            instance.status = "error"
+            instance.error_msg = "检测到残留挂载，请先卸载或重启"
         
         disks[cfg.disk_name] = instance
     except:
@@ -84,8 +209,80 @@ for cfg_dict in load_configs():
 
 @app.on_event("startup")
 async def startup_event():
+    import time
     logger.info("FastAPI Backend Starting Up...")
     logger.info(f"Registered routes: {[route.path for route in app.routes]}")
+    
+    # 后台状态更新逻辑
+    def status_updater():
+        while True:
+            try:
+                # 1. 获取当前系统的所有挂载点
+                import subprocess
+                res = subprocess.run(['mount'], capture_output=True, text=True, timeout=5)
+                mounts_output = res.stdout
+                
+                for name, instance in disks.items():
+                    # 2. 计算缓存大小
+                    total_size = 0
+                    try:
+                        if os.path.exists(instance.config.cache_dir):
+                            for f in os.listdir(instance.config.cache_dir):
+                                if f.startswith(instance.config.disk_name):
+                                    try:
+                                        f_path = os.path.join(instance.config.cache_dir, f)
+                                        if os.path.isfile(f_path):
+                                            total_size += os.path.getsize(f_path)
+                                    except: pass
+                    except: pass
+                    instance.cache_usage_bytes = total_size
+                    
+                    # 3. 检测挂载状态
+                    import re
+                    is_loop_mounted = bool(re.search(rf"\s{re.escape(instance.final_mountpoint)}\s", mounts_output))
+                    is_fuse_mounted_in_list = bool(re.search(rf"\s{re.escape(instance.config.mount_path)}\s", mounts_output))
+                    
+                    is_fuse_connected = False
+                    if is_fuse_mounted_in_list:
+                        try:
+                            os.stat(instance.config.mount_path)
+                            is_fuse_connected = True
+                        except:
+                            is_fuse_connected = False
+                    
+                    if is_loop_mounted and is_fuse_connected:
+                        instance.loop_status = "mounted"
+                        instance.status = "running"
+                        instance.error_msg = ""
+                    elif is_loop_mounted:
+                        instance.loop_status = "mounted"
+                        instance.status = "error"
+                        instance.error_msg = "FUSE 层连接断开 (Transport endpoint not connected)"
+                    else:
+                        instance.loop_status = "unmounted"
+                        if instance.status == "running":
+                            instance.status = "stopped"
+                    
+                    # 4. 更新上传队列大小
+                    instance.upload_queue_size = len(instance.vdrive.upload_queue) if instance.vdrive else 0
+                    
+            except Exception as e:
+                logger.error(f"Status updater error: {e}")
+            
+            time.sleep(5)
+
+    threading.Thread(target=status_updater, daemon=True).start()
+
+    # 自动重连逻辑
+    def auto_reconnect():
+        while True:
+            for name, instance in disks.items():
+                if instance.status == "error" and "Transport endpoint not connected" in instance.error_msg:
+                    logger.info(f"Attempting to auto-reconnect disk {name}...")
+                    threading.Thread(target=do_mount, args=(instance,), daemon=True).start()
+            time.sleep(30)
+    
+    threading.Thread(target=auto_reconnect, daemon=True).start()
 
 # 静态文件路由
 @app.get("/", response_class=HTMLResponse)
@@ -102,71 +299,15 @@ async def favicon():
 
 @app.get("/disks")
 def list_disks():
-    logger.info("Received request to /disks")
     result = []
-    # 获取当前系统的所有挂载点，避免在循环中多次调用
-    try:
-        import subprocess
-        res = subprocess.run(['mount'], capture_output=True, text=True, timeout=5)
-        mounts_output = res.stdout
-    except Exception as e:
-        logger.error(f"Failed to get mount list: {e}")
-        mounts_output = ""
-
     for name, instance in disks.items():
-        total_size = 0
-        try:
-            if os.path.exists(instance.config.cache_dir):
-                # 只统计当前磁盘的文件
-                for f in os.listdir(instance.config.cache_dir):
-                    if f.startswith(instance.config.disk_name):
-                        try:
-                            f_path = os.path.join(instance.config.cache_dir, f)
-                            # 增加对 cache 目录本身是否断开的检测（虽然概率低）
-                            if os.path.isfile(f_path):
-                                total_size += os.path.getsize(f_path)
-                        except: pass
-        except Exception as e:
-            logger.error(f"Error calculating cache size for {name}: {e}")
-        
-        # 实时检测挂载状态 - 使用 grep 替代直接检查 mounts_output 字符串，确保匹配准确
-        import re
-        is_loop_mounted = bool(re.search(rf"\s{re.escape(instance.final_mountpoint)}\s", mounts_output))
-        is_fuse_mounted_in_list = bool(re.search(rf"\s{re.escape(instance.config.mount_path)}\s", mounts_output))
-        
-        # 针对 FUSE 挂载点，检查是否发生 "Transport endpoint is not connected"
-        is_fuse_connected = False
-        if is_fuse_mounted_in_list:
-            try:
-                # 使用 os.stat 检查挂载点是否正常，设置极短超时
-                # 注意：os.stat 没有 timeout 参数，我们已经在 get_mounts 层面做了保护
-                # 这里通过 listdir 一个空路径或 stat 检查
-                os.stat(instance.config.mount_path)
-                is_fuse_connected = True
-            except:
-                logger.warning(f"FUSE mount point {instance.config.mount_path} is disconnected")
-                is_fuse_connected = False
-        
-        if is_loop_mounted and is_fuse_connected:
-            loop_status = "mounted"
-            instance.status = "running"
-            instance.error_msg = "" # 清除之前的错误
-        elif is_loop_mounted:
-            loop_status = "mounted"
-            instance.status = "error"
-            instance.error_msg = "FUSE 层连接断开 (Transport endpoint not connected)"
-        else:
-            loop_status = "unmounted"
-            if instance.status == "running":
-                instance.status = "stopped"
-        
         result.append({
             "disk_name": name,
             "status": instance.status,
-            "loop_status": loop_status,
+            "loop_status": instance.loop_status,
             "config": instance.config,
-            "cache_usage_bytes": total_size,
-            "upload_queue_size": len(instance.vdrive.upload_queue) if instance.vdrive else 0,
+            "cache_usage_bytes": instance.cache_usage_bytes,
+            "upload_queue_size": instance.upload_queue_size,
             "error_msg": instance.error_msg,
             "final_mountpoint": instance.final_mountpoint
         })
@@ -174,114 +315,47 @@ def list_disks():
 
 @app.post("/mount")
 async def mount_drive(config: MountConfig):
-    # 冲突检测
-    if config.disk_name in disks and disks[config.disk_name].status == "running":
-        # 如果名称相同且正在运行，尝试更新或报错
-        pass # 后续处理更新逻辑
-    
-    # 检查路径冲突
-    for name, inst in disks.items():
-        if name != config.disk_name:
+    # 检查是否是更新现有磁盘
+    existing_instance = disks.get(config.disk_name)
+    if existing_instance:
+        # 校验关键属性是否被修改
+        old = existing_instance.config
+        locked_changes = []
+        if old.disk_name != config.disk_name: locked_changes.append("磁盘名称")
+        if old.remote_path != config.remote_path: locked_changes.append("远程路径")
+        if old.block_size_mb != config.block_size_mb: locked_changes.append("分块大小")
+        if old.disk_size_gb != config.disk_size_gb: locked_changes.append("磁盘容量")
+        
+        if locked_changes:
+            raise HTTPException(status_code=400, detail=f"禁止修改关键属性: {', '.join(locked_changes)}。修改这些属性会导致现有数据损坏。")
+        
+        # 更新可变属性
+        existing_instance.config = config
+        instance = existing_instance
+    else:
+        # 检查路径冲突
+        for name, inst in disks.items():
             if inst.config.mount_path == config.mount_path:
                 raise HTTPException(status_code=400, detail=f"FUSE挂载路径冲突: {config.mount_path} 已被磁盘 {name} 使用")
-    
-    # 创建或更新实例
-    instance = disks.get(config.disk_name)
-    if not instance:
         instance = DiskInstance(config)
         disks[config.disk_name] = instance
-    else:
-        instance.config = config # 更新配置
-        
-    # 保存配置到文件
-    all_configs = [inst.config.dict() for inst in disks.values()]
-    save_configs(all_configs)
+
+    # 保存配置
+    configs = load_configs()
+    updated = False
+    for i, cfg in enumerate(configs):
+        if cfg.get('disk_name') == config.disk_name:
+            configs[i] = config.dict()
+            updated = True
+            break
+    if not updated:
+        configs.append(config.dict())
+    save_configs(configs)
+
+    if instance.status == "running":
+        return {"message": f"磁盘 {config.disk_name} 配置已更新（部分改动需重启生效）"}
 
     # 异步执行挂载逻辑
-    instance.status = "starting"
-    instance.error_msg = ""
-    
-    def do_mount(inst: DiskInstance):
-        try:
-            cfg = inst.config
-            # 0. 预清理：如果挂载路径已存在且是挂载点，尝试先卸载
-            import subprocess
-            try:
-                subprocess.run(['fusermount3', '-u', cfg.mount_path], check=False, capture_output=True)
-                subprocess.run(['umount', '-l', cfg.mount_path], check=False, capture_output=True)
-            except:
-                pass
-
-            # 1. 启动 FUSE 层
-            inst.vdrive = VDrive(
-                dav_url=cfg.dav_url, 
-                dav_user=cfg.dav_user, 
-                dav_password=cfg.dav_password, 
-                cache_dir=cfg.cache_dir, 
-                disk_size_gb=cfg.disk_size_gb,
-                max_cache_size_gb=cfg.max_cache_gb,
-                block_size_mb=cfg.block_size_mb,
-                img_name=cfg.disk_name,
-                remote_path=cfg.remote_path,
-                concurrency=cfg.concurrency
-            )
-            
-            os.makedirs(cfg.mount_path, exist_ok=True)
-            
-            def start_fuse():
-                FUSE(inst.vdrive, cfg.mount_path, foreground=True, nonempty=True, allow_other=True, direct_io=True)
-                inst.status = "stopped"
-            
-            inst.thread = threading.Thread(target=start_fuse, daemon=True)
-            inst.thread.start()
-            
-            # 2. 等待镜像并挂载 Loop
-            img_name = cfg.disk_name if cfg.disk_name.endswith('.img') else f"{cfg.disk_name}.img"
-            img_path = os.path.join(cfg.mount_path, img_name)
-            
-            import time
-            max_wait = 60
-            while not os.path.exists(img_path) and max_wait > 0:
-                time.sleep(1)
-                max_wait -= 1
-            
-            if not os.path.exists(img_path):
-                raise Exception("FUSE镜像未能按时生成")
-
-            os.makedirs(inst.final_mountpoint, exist_ok=True)
-            import subprocess
-            subprocess.run(['umount', '-l', inst.final_mountpoint], check=False)
-            
-            # 检查格式化
-            needs_format = True
-            try:
-                # 尝试先挂载，如果成功则不需要格式化
-                test_res = subprocess.run(['mount', '-o', 'loop,ro', img_path, inst.final_mountpoint], capture_output=True)
-                if test_res.returncode == 0:
-                    subprocess.run(['umount', '-l', inst.final_mountpoint], check=True)
-                    needs_format = False
-                else:
-                    # 如果挂载失败，再检查 blkid
-                    res = subprocess.run(['blkid', img_path], capture_output=True, text=True)
-                    if "TYPE=" in res.stdout:
-                        # 虽然有类型但挂载失败，说明可能损坏，需要强制格式化
-                        logger.warning(f"Disk {cfg.disk_name} has TYPE but mount failed, might be corrupted. Forcing format.")
-                        needs_format = True
-            except: pass
-            
-            if needs_format:
-                logger.info(f"Formatting disk {cfg.disk_name}...")
-                subprocess.run(['mkfs.ext4', '-F', '-E', 'lazy_itable_init=1,lazy_journal_init=1', img_path], check=True)
-            
-            subprocess.run(['mount', '-o', 'loop', img_path, inst.final_mountpoint], check=True)
-            inst.status = "running"
-            logger.info(f"Disk {cfg.disk_name} mounted successfully at {inst.final_mountpoint}")
-            
-        except Exception as e:
-            inst.status = "error"
-            inst.error_msg = str(e)
-            logger.error(f"Mount disk {inst.config.disk_name} failed: {e}")
-
     threading.Thread(target=do_mount, args=(instance,), daemon=True).start()
     
     return {"message": f"磁盘 {config.disk_name} 挂载任务已启动"}
@@ -339,11 +413,17 @@ def delete_disk(disk_name: str, delete_remote: bool = False):
     if target_config:
         try:
             cache_dir = target_config['cache_dir']
-            disk_img_name = target_config['disk_name']
+            disk_name = target_config['disk_name']
+            # 兼容带有 .img 后缀和不带后缀的情况
+            prefixes = [
+                f"{disk_name}_blk_", 
+                f".{disk_name}_metadata.db",
+                f"{disk_name}.img_blk_", 
+                f".{disk_name}.img_metadata.db"
+            ]
             if os.path.exists(cache_dir):
                 for f in os.listdir(cache_dir):
-                    # 删除块文件和元数据数据库
-                    if f.startswith(f"{disk_img_name}_blk_") or f.startswith(f".{disk_img_name}_metadata.db"):
+                    if any(f.startswith(p) for p in prefixes):
                         try:
                             os.remove(os.path.join(cache_dir, f))
                         except: pass

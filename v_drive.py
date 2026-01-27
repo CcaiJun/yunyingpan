@@ -82,7 +82,8 @@ class MetadataDB:
 
 class VDrive(Operations):
     def __init__(self, dav_url, dav_user, dav_password, cache_dir, disk_size_gb, max_cache_size_gb, block_size_mb=4, img_name="virtual_disk.img", remote_path="blocks", concurrency=4):
-        self.client = WebDAVClient(dav_url, auth=(dav_user, dav_password))
+        from httpx import Timeout
+        self.client = WebDAVClient(dav_url, auth=(dav_user, dav_password), timeout=Timeout(30.0, connect=10.0))
         self.cache_dir = os.path.abspath(cache_dir)
         self.disk_size = disk_size_gb * 1024 * 1024 * 1024
         self.max_cache_size = max_cache_size_gb * 1024 * 1024 * 1024
@@ -97,6 +98,7 @@ class VDrive(Operations):
         self.db = MetadataDB(os.path.join(self.cache_dir, f'.{self.img_name}_metadata.db'))
         self.upload_queue = set()
         self.upload_lock = threading.Lock()
+        self._remote_dirs_checked = False
         
         # 启动后台线程
         for _ in range(self.concurrency):
@@ -157,13 +159,15 @@ class VDrive(Operations):
                                 self.db.set_block_status(block_id, 'cached', remote_exists=0)
                             continue
 
-                        # 确保远程目录存在
-                        parts = self.remote_path.split('/')
-                        current = ""
-                        for part in parts:
-                            current = f"{current}/{part}".strip('/')
-                            try: self.client.mkdir(current)
-                            except: pass
+                        # 确保远程目录存在 (只检查一次)
+                        if not self._remote_dirs_checked:
+                            parts = self.remote_path.split('/')
+                            current = ""
+                            for part in parts:
+                                current = f"{current}/{part}".strip('/')
+                                try: self.client.mkdir(current)
+                                except: pass
+                            self._remote_dirs_checked = True
                         
                         # 原子上传：先上传到 .tmp 文件，再 rename
                         try:
@@ -213,6 +217,7 @@ class VDrive(Operations):
             time.sleep(60)
 
     def getattr(self, path, fh=None):
+        logger.debug(f"getattr: {path}")
         if path == '/':
             return {'st_mode': 0o40755, 'st_nlink': 2}
         if path == '/' + self.img_name:
@@ -229,16 +234,20 @@ class VDrive(Operations):
         raise FuseOSError(errno.ENOENT)
 
     def readdir(self, path, fh):
+        logger.debug(f"readdir: {path}")
         yield '.'
         yield '..'
         yield self.img_name
 
     def open(self, path, flags):
+        logger.debug(f"open: {path}")
         if path == '/' + self.img_name:
-            return 0
+            # 返回一个虚拟的句柄，不要返回 0，因为 0 是 stdin
+            return 1000
         raise FuseOSError(errno.ENOENT)
 
     def read(self, path, length, offset, fh):
+        # logger.debug(f"read: {path}, length: {length}, offset: {offset}")
         if path != '/' + self.img_name:
             raise FuseOSError(errno.EIO)
 
@@ -408,7 +417,8 @@ class VDrive(Operations):
 
     def release(self, path, fh):
         try:
-            os.close(fh)
+            if fh != 1000:
+                os.close(fh)
         except Exception as e:
             logger.error(f"Error closing fh for {path}: {e}")
         return 0
