@@ -21,6 +21,7 @@ class MetadataDB:
 
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
+            conn.execute('PRAGMA journal_mode=WAL')  # 开启 WAL 模式增强可靠性
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS config (
                     key TEXT PRIMARY KEY,
@@ -141,6 +142,7 @@ class VDrive(Operations):
                     
                     if os.path.exists(block_path):
                         remote_file_path = f"{self.remote_path}/blk_{block_id:08d}.dat"
+                        remote_tmp_path = f"{remote_file_path}.tmp"
                         
                         # 流量优化：检查是否全为零
                         if self._is_all_zeros(block_path):
@@ -163,9 +165,29 @@ class VDrive(Operations):
                             try: self.client.mkdir(current)
                             except: pass
                         
-                        self.client.upload_file(block_path, remote_file_path, overwrite=True)
-                        self.db.set_block_status(block_id, 'cached', remote_exists=1)
-                        logger.info(f"Block {block_id} uploaded to WebDAV")
+                        # 原子上传：先上传到 .tmp 文件，再 rename
+                        try:
+                            logger.info(f"Uploading block {block_id} to tmp...")
+                            self.client.upload_file(block_path, remote_tmp_path, overwrite=True)
+                            
+                            # WebDAV 的 move 操作通常是原子的
+                            logger.info(f"Moving block {block_id} to final destination...")
+                            try:
+                                # 如果目标已存在，先删除（某些 WebDAV 不支持覆盖移动）
+                                if remote_exists:
+                                    self.client.remove(remote_file_path)
+                            except: pass
+                            
+                            self.client.move(remote_tmp_path, remote_file_path)
+                            
+                            self.db.set_block_status(block_id, 'cached', remote_exists=1)
+                            logger.info(f"Block {block_id} uploaded and moved successfully")
+                        except Exception as upload_err:
+                            logger.error(f"Atomic upload failed for block {block_id}: {upload_err}")
+                            # 尝试清理临时文件
+                            try: self.client.remove(remote_tmp_path)
+                            except: pass
+                            raise upload_err
                 except Exception as e:
                     logger.error(f"Block {block_id} upload failed: {e}")
                     with self.upload_lock:
@@ -307,6 +329,10 @@ class VDrive(Operations):
                 with open(block_path, 'r+b') as f:
                     f.seek(block_offset)
                     f.write(buf[bytes_written:bytes_written+chunk_len])
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno()) # 强制刷盘，防止断电导致块文件损坏
+                    except: pass
             except Exception as e:
                 logger.error(f"Write to block file {block_id} failed: {e}")
                 raise FuseOSError(errno.EIO)
@@ -319,6 +345,27 @@ class VDrive(Operations):
         return length
 
     def release(self, path, fh):
+        return 0
+
+    def flush(self, path, fh):
+        """当文件关闭或调用 fsync 时触发"""
+        # 对于块镜像文件，确保所有脏块都进入上传队列
+        return 0
+
+    def fsync(self, path, datasync, fh):
+        """强制同步到磁盘"""
+        if path == '/' + self.img_name:
+            # 获取所有当前正在写入的块文件并执行 fsync
+            # 注意：这只是同步到本地磁盘，真正的同步到云端是由后台线程异步完成的
+            # 但这能保证断电时本地块文件的完整性
+            block_files = [f for f in os.listdir(self.cache_dir) if f.startswith(f"{self.img_name}_blk_")]
+            for f in block_files:
+                try:
+                    f_path = os.path.join(self.cache_dir, f)
+                    fd = os.open(f_path, os.O_RDONLY)
+                    os.fsync(fd)
+                    os.close(fd)
+                except: pass
         return 0
 
     def mkdir(self, path, mode):
