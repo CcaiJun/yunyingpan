@@ -311,23 +311,52 @@ def unmount_disk(disk_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/disks/{disk_name}")
-def delete_disk(disk_name: str):
-    logger.info(f"Deleting disk: {disk_name}")
+def delete_disk(disk_name: str, delete_remote: bool = False):
+    logger.info(f"Deleting disk: {disk_name}, delete_remote: {delete_remote}")
     instance = disks.get(disk_name)
     
-    # 无论 instance 是否存在，都尝试从配置文件中清理
+    # 查找配置以获取远程路径和缓存目录信息（即使实例没运行）
     configs = load_configs()
+    target_config = next((c for c in configs if c.get('disk_name') == disk_name), None)
+    
+    # 从配置文件中清理
     new_configs = [c for c in configs if c.get('disk_name') != disk_name]
     save_configs(new_configs)
     
+    # 如果指定了删除远程文件
+    if delete_remote and target_config:
+        try:
+            from webdav4.client import Client as WebDAVClient
+            client = WebDAVClient(target_config['dav_url'], auth=(target_config['dav_user'], target_config['dav_password']))
+            remote_path = target_config['remote_path'].strip('/')
+            if client.exists(remote_path):
+                logger.info(f"Deleting remote directory: {remote_path}")
+                client.remove(remote_path)
+        except Exception as e:
+            logger.error(f"Failed to delete remote files for {disk_name}: {e}")
+
+    # 清理本地缓存文件
+    if target_config:
+        try:
+            cache_dir = target_config['cache_dir']
+            disk_img_name = target_config['disk_name']
+            if os.path.exists(cache_dir):
+                for f in os.listdir(cache_dir):
+                    # 删除块文件和元数据数据库
+                    if f.startswith(f"{disk_img_name}_blk_") or f.startswith(f".{disk_img_name}_metadata.db"):
+                        try:
+                            os.remove(os.path.join(cache_dir, f))
+                        except: pass
+        except Exception as e:
+            logger.error(f"Failed to delete local cache for {disk_name}: {e}")
+
     if not instance:
-        return {"message": f"磁盘 {disk_name} 配置已从文件中清理"}
+        return {"message": f"磁盘 {disk_name} 配置及本地缓存已清理" + ("，远程文件已尝试删除" if delete_remote else "")}
     
     try:
         # 如果正在运行，先尝试卸载
         if instance.status in ["running", "starting", "error"]:
             try:
-                # 直接调用卸载逻辑，不抛出异常
                 import subprocess
                 if os.path.ismount(instance.final_mountpoint):
                     subprocess.run(['umount', '-l', instance.final_mountpoint], check=False)
@@ -341,7 +370,7 @@ def delete_disk(disk_name: str):
             del disks[disk_name]
         
         logger.info(f"Disk {disk_name} deleted successfully")
-        return {"message": f"磁盘 {disk_name} 已成功删除"}
+        return {"message": f"磁盘 {disk_name} 已成功删除" + ("（含远程文件）" if delete_remote else "")}
     except Exception as e:
         logger.error(f"Error deleting disk {disk_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))

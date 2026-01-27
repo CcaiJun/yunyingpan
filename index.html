@@ -403,9 +403,20 @@
         }
 
         async function deleteDisk(name) {
-            if (!confirm(`确定要彻底删除磁盘 ${name} 的配置吗？（本地数据和远程数据不会被删除）`)) return;
+            const deleteRemote = confirm(`确定要删除磁盘 "${name}" 吗？\n\n点击"确定"将清理本地配置和缓存。\n\n是否同时删除云端(WebDAV)上的数据文件？\n(取消则保留云端数据，确定则永久删除)`);
+            
+            // 弹出第二次确认以确保安全
+            let finalConfirm = true;
+            if (deleteRemote) {
+                finalConfirm = confirm("警告：您选择了同时删除云端文件！这将永久删除该硬盘在 WebDAV 上的所有数据块，不可恢复。确定继续吗？");
+            }
+
+            if (!finalConfirm) return;
+
             try {
-                const res = await fetch(`${API_BASE}/disks/${encodeURIComponent(name)}`, { method: 'DELETE' });
+                const res = await fetch(`${API_BASE}/disks/${encodeURIComponent(name)}?delete_remote=${deleteRemote}`, {
+                    method: 'DELETE'
+                });
                 const data = await res.json();
                 alert(data.message || data.detail);
                 fetchDisks();
