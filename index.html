@@ -365,7 +365,7 @@
                 card.innerHTML = `
                     <div class="disk-header">
                         <span class="disk-title"><i class="fas fa-hdd mr-2"></i>${disk.disk_name}</span>
-                        <span class="status-badge ${statusClass}">${disk.status === 'running' ? '运行中' : (disk.status === 'stopped' ? '已停止' : '状态异常')}</span>
+                        <span class="status-badge ${statusClass}">${disk.status === 'running' ? '运行中' : (disk.status === 'stopped' ? '已停止' : (disk.status === 'starting' ? '启动中...' : '状态异常'))}</span>
                     </div>
                     <div class="disk-info">容量: ${disk.config.disk_size_gb} GB</div>
                     <div class="disk-info">FUSE挂载: ${disk.config.mount_path}</div>
@@ -373,12 +373,13 @@
                     <div class="disk-info">系统挂载: ${disk.final_mountpoint} (${disk.loop_status === 'mounted' ? '已挂载' : '未挂载'})</div>
                     <div class="disk-info">本地缓存: ${cacheMB} MB / ${disk.config.max_cache_gb} GB</div>
                     <div class="disk-info">待上传: ${disk.upload_queue_size} 块</div>
-                    ${disk.error_msg ? `<div class="disk-info" style="color:red">错误: ${disk.error_msg}</div>` : ''}
+                    
+                    ${disk.error_msg ? `<div class="p-2 mt-2 bg-red-50 text-red-600 text-xs rounded border border-red-100">${disk.error_msg}</div>` : ''}
                     
                     <div class="disk-actions">
-                        ${disk.status !== 'running' ? 
-                            `<button onclick="mountDisk('${disk.disk_name}')" class="bg-blue-600 text-white px-3 py-1 rounded text-sm hover:bg-blue-700 transition">启动</button>` :
-                            `<button onclick="unmountDisk('${disk.disk_name}')" class="bg-slate-500 text-white px-3 py-1 rounded text-sm hover:bg-slate-600 transition">卸载</button>`
+                        ${disk.status === 'running' ? 
+                            `<button onclick="unmountDisk('${disk.disk_name}')" class="bg-slate-500 text-white px-3 py-1 rounded text-sm hover:bg-slate-600 transition">卸载</button>` :
+                            `<button onclick="mountDisk('${disk.disk_name}')" class="bg-blue-600 text-white px-3 py-1 rounded text-sm hover:bg-blue-700 transition" ${disk.status === 'starting' ? 'disabled style="opacity:0.5; cursor:not-allowed;"' : ''}>${disk.status === 'starting' ? '启动中' : '启动'}</button>`
                         }
                         <button onclick="editDisk('${disk.disk_name}')" class="border border-slate-200 px-3 py-1 rounded text-sm hover:bg-slate-50 transition">配置</button>
                         <button onclick="deleteDisk('${disk.disk_name}')" class="bg-red-500 text-white px-3 py-1 rounded text-sm hover:bg-red-600 transition">删除</button>

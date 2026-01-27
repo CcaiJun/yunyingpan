@@ -127,7 +127,7 @@ def do_mount(inst: DiskInstance):
         logger.info(f"Waiting for image file: {img_path}")
 
         import time
-        max_wait = 60
+        max_wait = 300 # 增加等待时间，大容量硬盘初始化较慢
         while not os.path.exists(img_path) and max_wait > 0:
             if inst.status == "error": # FUSE 启动失败
                 return
@@ -135,7 +135,7 @@ def do_mount(inst: DiskInstance):
             max_wait -= 1
 
         if not os.path.exists(img_path):
-            logger.error(f"Image file {img_path} not found after 60s")
+            logger.error(f"Image file {img_path} not found after 300s")
             raise Exception("FUSE镜像未能按时生成")
 
         logger.info(f"Image file found, preparing loop mount at {inst.final_mountpoint}")
@@ -154,8 +154,9 @@ def do_mount(inst: DiskInstance):
 
         if needs_format:
             logger.info(f"Formatting disk {cfg.disk_name}...")
-            # 增加 -b 4096 明确块大小，有时能解决 Invalid argument 问题
-            subprocess.run(['mkfs.ext4', '-F', '-b', '4096', '-E', 'lazy_itable_init=1,lazy_journal_init=1', img_path], check=True)
+            # 对于 1024G 等大容量硬盘，使用 -T largefile4 减少 inode 数量，大幅降低元数据写入量
+            # -E lazy_itable_init=1,lazy_journal_init=1 也可以加速格式化过程
+            subprocess.run(['mkfs.ext4', '-F', '-T', 'largefile4', '-b', '4096', '-E', 'lazy_itable_init=1,lazy_journal_init=1', img_path], check=True)
 
         logger.info(f"Final loop mount: {img_path} -> {inst.final_mountpoint}")
         try:
