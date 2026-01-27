@@ -80,9 +80,9 @@ def list_disks():
         if os.path.exists(instance.config.cache_dir):
             for root, dirs, files in os.walk(instance.config.cache_dir):
                 for f in files:
-                    if f.startswith('.') or f == '.metadata.db': continue
-                    try: total_size += os.path.getsize(os.path.join(root, f))
-                    except: pass
+                    if f.startswith(instance.config.disk_name):
+                        try: total_size += os.path.getsize(os.path.join(root, f))
+                        except: pass
         
         loop_status = "unmounted"
         try:
@@ -172,7 +172,7 @@ async def mount_drive(config: MountConfig):
             img_path = os.path.join(cfg.mount_path, img_name)
             
             import time
-            max_wait = 20
+            max_wait = 60
             while not os.path.exists(img_path) and max_wait > 0:
                 time.sleep(1)
                 max_wait -= 1
@@ -187,12 +187,23 @@ async def mount_drive(config: MountConfig):
             # 检查格式化
             needs_format = True
             try:
-                res = subprocess.run(['blkid', img_path], capture_output=True, text=True)
-                if "TYPE=" in res.stdout: needs_format = False
+                # 尝试先挂载，如果成功则不需要格式化
+                test_res = subprocess.run(['mount', '-o', 'loop,ro', img_path, inst.final_mountpoint], capture_output=True)
+                if test_res.returncode == 0:
+                    subprocess.run(['umount', '-l', inst.final_mountpoint], check=True)
+                    needs_format = False
+                else:
+                    # 如果挂载失败，再检查 blkid
+                    res = subprocess.run(['blkid', img_path], capture_output=True, text=True)
+                    if "TYPE=" in res.stdout:
+                        # 虽然有类型但挂载失败，说明可能损坏，需要强制格式化
+                        logger.warning(f"Disk {cfg.disk_name} has TYPE but mount failed, might be corrupted. Forcing format.")
+                        needs_format = True
             except: pass
             
             if needs_format:
-                subprocess.run(['mkfs.ext4', '-F', img_path], check=True)
+                logger.info(f"Formatting disk {cfg.disk_name}...")
+                subprocess.run(['mkfs.ext4', '-F', '-E', 'lazy_itable_init=1,lazy_journal_init=1', img_path], check=True)
             
             subprocess.run(['mount', '-o', 'loop', img_path, inst.final_mountpoint], check=True)
             inst.status = "running"
@@ -215,43 +226,52 @@ def unmount_disk(disk_name: str):
     
     try:
         import subprocess
-        # 1. 卸载 Loop
-        subprocess.run(['umount', '-l', instance.final_mountpoint], check=False)
-        # 2. 卸载 FUSE
-        subprocess.run(['fusermount3', '-u', instance.config.mount_path], check=False)
-        subprocess.run(['umount', '-l', instance.config.mount_path], check=False)
+        # 1. 卸载 Loop 挂载点 (e.g., /mnt/v_disks/256)
+        if os.path.ismount(instance.final_mountpoint):
+            subprocess.run(['umount', '-l', instance.final_mountpoint], check=False)
+        
+        # 2. 卸载 FUSE 挂载点 (e.g., /mnt/pan256)
+        if os.path.ismount(instance.config.mount_path):
+            subprocess.run(['fusermount3', '-u', instance.config.mount_path], check=False)
+            subprocess.run(['umount', '-l', instance.config.mount_path], check=False)
         
         instance.status = "stopped"
+        instance.loop_status = "unmounted"
         return {"message": f"磁盘 {disk_name} 已卸载"}
     except Exception as e:
+        logger.error(f"Unmount disk {disk_name} error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/disks/{disk_name}")
 def delete_disk(disk_name: str):
     logger.info(f"Deleting disk: {disk_name}")
     instance = disks.get(disk_name)
+    
+    # 无论 instance 是否存在，都尝试从配置文件中清理
+    configs = load_configs()
+    new_configs = [c for c in configs if c.get('disk_name') != disk_name]
+    save_configs(new_configs)
+    
     if not instance:
-        # 即使不存在也尝试从配置文件中删除（以防万一同步出错）
-        configs = load_configs()
-        new_configs = [c for c in configs if c.get('disk_name') != disk_name]
-        if len(configs) != len(new_configs):
-            save_configs(new_configs)
-            return {"message": f"磁盘 {disk_name} 配置已从文件中清理"}
-        raise HTTPException(status_code=404, detail="磁盘不存在")
+        return {"message": f"磁盘 {disk_name} 配置已从文件中清理"}
     
     try:
-        if instance.status == "running" or instance.status == "starting":
+        # 如果正在运行，先尝试卸载
+        if instance.status in ["running", "starting", "error"]:
             try:
-                unmount_disk(disk_name)
+                # 直接调用卸载逻辑，不抛出异常
+                import subprocess
+                if os.path.ismount(instance.final_mountpoint):
+                    subprocess.run(['umount', '-l', instance.final_mountpoint], check=False)
+                if os.path.ismount(instance.config.mount_path):
+                    subprocess.run(['fusermount3', '-u', instance.config.mount_path], check=False)
+                    subprocess.run(['umount', '-l', instance.config.mount_path], check=False)
             except:
                 pass
         
         if disk_name in disks:
             del disks[disk_name]
         
-        # 强制更新配置文件
-        all_configs = [inst.config.dict() for inst in disks.values()]
-        save_configs(all_configs)
         logger.info(f"Disk {disk_name} deleted successfully")
         return {"message": f"磁盘 {disk_name} 已成功删除"}
     except Exception as e:

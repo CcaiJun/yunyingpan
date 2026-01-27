@@ -31,10 +31,37 @@ class MetadataDB:
                 CREATE TABLE IF NOT EXISTS blocks (
                     block_id INTEGER PRIMARY KEY,
                     status TEXT, -- 'empty', 'cached', 'dirty', 'uploading'
+                    remote_exists INTEGER DEFAULT 0, -- 0: no, 1: yes
                     last_access REAL
                 )
             ''')
+            # 检查是否需要更新旧表
+            cursor = conn.execute("PRAGMA table_info(blocks)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'remote_exists' not in columns:
+                conn.execute('ALTER TABLE blocks ADD COLUMN remote_exists INTEGER DEFAULT 0')
             conn.commit()
+
+    def set_block_status(self, block_id, status, remote_exists=None):
+        with sqlite3.connect(self.db_path) as conn:
+            if remote_exists is not None:
+                conn.execute('INSERT OR REPLACE INTO blocks (block_id, status, remote_exists, last_access) VALUES (?, ?, ?, ?)',
+                            (block_id, status, remote_exists, time.time()))
+            else:
+                # 保持原有的 remote_exists 值
+                conn.execute('''
+                    INSERT INTO blocks (block_id, status, last_access) VALUES (?, ?, ?)
+                    ON CONFLICT(block_id) DO UPDATE SET status=excluded.status, last_access=excluded.last_access
+                ''', (block_id, status, time.time()))
+            conn.commit()
+
+    def get_block_info(self, block_id):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('SELECT status, remote_exists FROM blocks WHERE block_id = ?', (block_id,))
+            row = cursor.fetchone()
+            if row:
+                return row[0], row[1]
+            return 'empty', 0
 
     def get_config(self, key, default=None):
         with sqlite3.connect(self.db_path) as conn:
@@ -46,18 +73,6 @@ class MetadataDB:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)', (key, value))
             conn.commit()
-
-    def set_block_status(self, block_id, status):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute('INSERT OR REPLACE INTO blocks (block_id, status, last_access) VALUES (?, ?, ?)',
-                        (block_id, status, time.time()))
-            conn.commit()
-
-    def get_block_status(self, block_id):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute('SELECT status FROM blocks WHERE block_id = ?', (block_id,))
-            row = cursor.fetchone()
-            return row[0] if row else 'empty'
 
     def get_lru_blocks(self, limit):
         with sqlite3.connect(self.db_path) as conn:
@@ -93,18 +108,53 @@ class VDrive(Operations):
     def _get_block_path(self, block_id):
         return os.path.join(self.cache_dir, f"{self.img_name}_blk_{block_id:08d}.dat")
 
+    def _is_all_zeros(self, path):
+        """检查文件是否全为零，使用高效的读块方式"""
+        try:
+            if not os.path.exists(path):
+                return True
+            with open(path, 'rb') as f:
+                while True:
+                    chunk = f.read(1024 * 1024) # 每次读 1MB
+                    if not chunk:
+                        break
+                    if any(chunk): # 如果发现非零字节
+                        return False
+            return True
+        except Exception as e:
+            logger.error(f"Error checking zeros for {path}: {e}")
+            return False
+
     def _upload_worker(self):
         while True:
             block_id = None
             with self.upload_lock:
                 if self.upload_queue:
-                    block_id = self.upload_queue.pop()
+                    block_ids = sorted(list(self.upload_queue))
+                    block_id = block_ids[0]
+                    self.upload_queue.remove(block_id)
             
             if block_id is not None:
                 try:
                     block_path = self._get_block_path(block_id)
+                    status, remote_exists = self.db.get_block_info(block_id)
+                    
                     if os.path.exists(block_path):
                         remote_file_path = f"{self.remote_path}/blk_{block_id:08d}.dat"
+                        
+                        # 流量优化：检查是否全为零
+                        if self._is_all_zeros(block_path):
+                            if remote_exists:
+                                logger.info(f"Block {block_id} is zero but exists on remote. Deleting to save space.")
+                                try:
+                                    self.client.remove(remote_file_path)
+                                    self.db.set_block_status(block_id, 'cached', remote_exists=0)
+                                except: pass
+                            else:
+                                logger.info(f"Block {block_id} is zero and not on remote. Skipping.")
+                                self.db.set_block_status(block_id, 'cached', remote_exists=0)
+                            continue
+
                         # 确保远程目录存在
                         parts = self.remote_path.split('/')
                         current = ""
@@ -114,13 +164,13 @@ class VDrive(Operations):
                             except: pass
                         
                         self.client.upload_file(block_path, remote_file_path, overwrite=True)
-                        self.db.set_block_status(block_id, 'cached')
-                        logger.info(f"Block {block_id} uploaded to WebDAV: {remote_file_path}")
+                        self.db.set_block_status(block_id, 'cached', remote_exists=1)
+                        logger.info(f"Block {block_id} uploaded to WebDAV")
                 except Exception as e:
                     logger.error(f"Block {block_id} upload failed: {e}")
                     with self.upload_lock:
                         self.upload_queue.add(block_id)
-            time.sleep(1)
+            time.sleep(0.5)
 
     def _cache_worker(self):
         while True:
@@ -170,7 +220,7 @@ class VDrive(Operations):
         if path != '/' + self.img_name:
             raise FuseOSError(errno.EIO)
 
-        logger.info(f"Read request: {length} bytes at offset {offset}")
+        # logger.info(f"Read request: {length} bytes at offset {offset}")
         result = bytearray(length)
         bytes_read = 0
         
@@ -181,48 +231,37 @@ class VDrive(Operations):
             chunk_len = min(length - bytes_read, self.block_size - block_offset)
             
             block_path = self._get_block_path(block_id)
-            status = self.db.get_block_status(block_id)
+            status, remote_exists = self.db.get_block_info(block_id)
             
-            if status == 'empty':
-                # 尝试从 WebDAV 下载
-                remote_file_path = f"{self.remote_path}/blk_{block_id:08d}.dat"
-                try:
-                    # 首先检查本地是否有文件（可能数据库没记录但文件在）
-                    if not os.path.exists(block_path):
-                        if self.client.exists(remote_file_path):
-                            logger.info(f"Downloading block {block_id} from WebDAV...")
-                            self.client.download_file(remote_file_path, block_path)
-                            self.db.set_block_status(block_id, 'cached')
-                        else:
-                            # 远程也没有，说明是全 0 块
-                            result[bytes_read:bytes_read+chunk_len] = b'\x00' * chunk_len
-                            bytes_read += chunk_len
-                            continue
-                    else:
-                        self.db.set_block_status(block_id, 'cached')
-                except Exception as e:
-                    logger.error(f"Check/Download block {block_id} failed: {e}")
+            if not os.path.exists(block_path):
+                # 如果本地没有，尝试从远程下载
+                if remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat"):
+                    logger.info(f"Downloading block {block_id}...")
+                    try:
+                        self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path)
+                        self.db.set_block_status(block_id, 'cached', remote_exists=1)
+                    except Exception as e:
+                        logger.error(f"Download block {block_id} failed: {e}")
+                        result[bytes_read:bytes_read+chunk_len] = b'\x00' * chunk_len
+                        bytes_read += chunk_len
+                        continue
+                else:
+                    # 远程也没有，说明是全 0 块
                     result[bytes_read:bytes_read+chunk_len] = b'\x00' * chunk_len
                     bytes_read += chunk_len
+                    self.db.set_block_status(block_id, 'empty', remote_exists=0)
                     continue
 
             try:
-                if not os.path.exists(block_path):
-                    # 兜底：如果数据库说有但文件没了
-                    result[bytes_read:bytes_read+chunk_len] = b'\x00' * chunk_len
-                    bytes_read += chunk_len
-                else:
-                    with open(block_path, 'rb') as f:
-                        f.seek(block_offset)
-                        data = f.read(chunk_len)
-                        if not data:
-                            # 如果读不到数据，补 0
-                            data = b'\x00' * chunk_len
-                        result[bytes_read:bytes_read+len(data)] = data
-                        bytes_read += len(data)
+                with open(block_path, 'rb') as f:
+                    f.seek(block_offset)
+                    data = f.read(chunk_len)
+                    if not data:
+                        data = b'\x00' * chunk_len
+                    result[bytes_read:bytes_read+len(data)] = data
+                    bytes_read += len(data)
             except Exception as e:
                 logger.error(f"Read block {block_id} file failed: {e}")
-                # 不要轻易抛出 EIO，尝试用 0 填充保证系统不崩溃
                 result[bytes_read:bytes_read+chunk_len] = b'\x00' * chunk_len
                 bytes_read += chunk_len
             
@@ -235,7 +274,7 @@ class VDrive(Operations):
             raise FuseOSError(errno.EIO)
 
         length = len(buf)
-        logger.info(f"Write request: {length} bytes at offset {offset}")
+        # logger.info(f"Write request: {length} bytes at offset {offset}")
         bytes_written = 0
         
         while bytes_written < length:
@@ -245,23 +284,25 @@ class VDrive(Operations):
             chunk_len = min(length - bytes_written, self.block_size - block_offset)
             
             block_path = self._get_block_path(block_id)
+            status, remote_exists = self.db.get_block_info(block_id)
             
             # 确保块文件存在
             if not os.path.exists(block_path):
                 # 尝试下载
-                remote_file_path = f"{self.remote_path}/blk_{block_id:08d}.dat"
-                try:
-                    if self.client.exists(remote_file_path):
-                        self.client.download_file(remote_file_path, block_path)
-                    else:
-                        # 创建空块文件并预分配空间
+                if remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat"):
+                    try:
+                        self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path)
+                        self.db.set_block_status(block_id, 'cached', remote_exists=1)
+                    except Exception as e:
+                        logger.error(f"Download for write failed: {e}")
+                        # 下载失败，创建一个空洞文件（稀疏文件）
                         with open(block_path, 'wb') as f:
-                            f.write(b'\x00' * self.block_size)
-                except Exception as e:
-                    logger.error(f"Prepare write block {block_id} failed: {e}")
+                            f.truncate(self.block_size)
+                else:
+                    # 远程也没有，创建一个空洞文件（稀疏文件）以节省本地空间
                     with open(block_path, 'wb') as f:
-                        f.write(b'\x00' * self.block_size)
-
+                        f.truncate(self.block_size)
+            
             try:
                 with open(block_path, 'r+b') as f:
                     f.seek(block_offset)
