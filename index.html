@@ -278,14 +278,13 @@
             }
         }
 
+        let lastFetchSuccess = false;
+
         async function fetchDisks() {
             try {
-                // 使用相对路径，解决所有跨域和 IP 映射问题
                 const url = `/disks?t=` + new Date().getTime();
-                console.log("Fetching from:", url);
-                
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 10000); // 增加到 10 秒超时
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
 
                 const res = await fetch(url, {
                     cache: 'no-cache',
@@ -296,20 +295,52 @@
                 if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
                 const disks = await res.json();
                 renderDisks(disks);
+                lastFetchSuccess = true;
+                
+                // 成功后隐藏可能存在的错误提示
+                const errorEl = document.getElementById('backend-error');
+                if (errorEl) errorEl.classList.add('hidden');
             } catch (err) {
                 console.error("Fetch disks failed:", err);
                 
-                document.getElementById('diskList').innerHTML = `
-                    <div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #e74c3c;">
-                        <i class="fas fa-exclamation-triangle fa-3x mb-3"></i>
-                        <p>无法连接到后端服务 (${window.location.host})</p>
-                        <p class="text-sm mt-2">错误详情: ${err.name === 'AbortError' ? '请求超时 (10s)' : err.message}</p>
-                        <div class="mt-4 space-x-2">
-                            <button onclick="fetchDisks()" class="bg-slate-200 px-4 py-2 rounded text-slate-700 hover:bg-slate-300">手动重试</button>
-                            <button onclick="window.location.reload()" class="bg-blue-600 px-4 py-2 rounded text-white hover:bg-blue-700">刷新页面</button>
-                        </div>
-                    </div>`;
+                // 只有在从未成功加载过数据，或者容器为空时才显示全屏错误
+                const container = document.getElementById('diskList');
+                if (!lastFetchSuccess || container.innerHTML.trim() === '' || container.querySelector('.fa-exclamation-triangle')) {
+                    container.innerHTML = `
+                        <div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #e74c3c;">
+                            <i class="fas fa-exclamation-triangle fa-3x mb-3"></i>
+                            <p>无法连接到后端服务 (${window.location.host})</p>
+                            <p class="text-sm mt-2">错误详情: ${err.name === 'AbortError' ? '请求超时 (10s)' : err.message}</p>
+                            <div class="mt-4 space-x-2">
+                                <button onclick="fetchDisks()" class="bg-slate-200 px-4 py-2 rounded text-slate-700 hover:bg-slate-300">手动重试</button>
+                                <button onclick="window.location.reload()" class="bg-blue-600 px-4 py-2 rounded text-white hover:bg-blue-700">刷新页面</button>
+                            </div>
+                        </div>`;
+                } else {
+                    // 如果已经有数据，只在顶部显示一个小的错误条，不打断用户操作
+                    showTransientError(`连接后端失败: ${err.message}`);
+                    console.warn('Silent fetch error - keeping existing data');
+                }
             }
+        }
+
+        function showTransientError(msg) {
+            let errorEl = document.getElementById('backend-error');
+            if (!errorEl) {
+                errorEl = document.createElement('div');
+                errorEl.id = 'backend-error';
+                errorEl.className = 'fixed top-4 right-4 bg-red-500 text-white px-6 py-3 rounded-lg shadow-lg z-50 transition-all duration-500';
+                document.body.appendChild(errorEl);
+            }
+            errorEl.textContent = msg;
+            errorEl.classList.remove('hidden', 'opacity-0');
+            
+            // 5秒后自动消失
+            clearTimeout(window.errorTimeout);
+            window.errorTimeout = setTimeout(() => {
+                errorEl.classList.add('opacity-0');
+                setTimeout(() => errorEl.classList.add('hidden'), 500);
+            }, 5000);
         }
 
         function renderDisks(disks) {
@@ -508,7 +539,7 @@
         }
 
         // 轮询更新状态
-        setInterval(fetchDisks, 3000);
+        setInterval(fetchDisks, 15000);
         fetchDisks();
         loadConfig();
     </script>

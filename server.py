@@ -154,7 +154,8 @@ def do_mount(inst: DiskInstance):
 
         if needs_format:
             logger.info(f"Formatting disk {cfg.disk_name}...")
-            subprocess.run(['mkfs.ext4', '-F', '-E', 'lazy_itable_init=1,lazy_journal_init=1', img_path], check=True)
+            # 增加 -b 4096 明确块大小，有时能解决 Invalid argument 问题
+            subprocess.run(['mkfs.ext4', '-F', '-b', '4096', '-E', 'lazy_itable_init=1,lazy_journal_init=1', img_path], check=True)
 
         logger.info(f"Final loop mount: {img_path} -> {inst.final_mountpoint}")
         try:
@@ -215,36 +216,45 @@ async def startup_event():
     
     # 后台状态更新逻辑
     def status_updater():
+        last_cache_check = 0
         while True:
             try:
                 # 1. 获取当前系统的所有挂载点
                 import subprocess
-                res = subprocess.run(['mount'], capture_output=True, text=True, timeout=5)
+                res = subprocess.run(['mount'], capture_output=True, text=True, timeout=2)
                 mounts_output = res.stdout
                 
+                now = time.time()
+                check_cache = (now - last_cache_check) > 30 # 每30秒检查一次缓存大小，而不是每5秒
+                
                 for name, instance in disks.items():
-                    # 2. 计算缓存大小
-                    total_size = 0
-                    try:
-                        if os.path.exists(instance.config.cache_dir):
-                            for f in os.listdir(instance.config.cache_dir):
-                                if f.startswith(instance.config.disk_name):
-                                    try:
-                                        f_path = os.path.join(instance.config.cache_dir, f)
-                                        if os.path.isfile(f_path):
+                    # 2. 计算缓存大小 (优化：降低频率)
+                    if check_cache:
+                        total_size = 0
+                        try:
+                            if os.path.exists(instance.config.cache_dir):
+                                # 优化：只统计属于该磁盘的块文件
+                                prefix = f"{instance.config.disk_name}_blk_"
+                                for f in os.listdir(instance.config.cache_dir):
+                                    if f.startswith(prefix):
+                                        try:
+                                            f_path = os.path.join(instance.config.cache_dir, f)
                                             total_size += os.path.getsize(f_path)
-                                    except: pass
-                    except: pass
-                    instance.cache_usage_bytes = total_size
+                                        except: pass
+                        except: pass
+                        instance.cache_usage_bytes = total_size
                     
                     # 3. 检测挂载状态
                     import re
-                    is_loop_mounted = bool(re.search(rf"\s{re.escape(instance.final_mountpoint)}\s", mounts_output))
-                    is_fuse_mounted_in_list = bool(re.search(rf"\s{re.escape(instance.config.mount_path)}\s", mounts_output))
+                    # 优化正则匹配，减少开销
+                    is_loop_mounted = f" {instance.final_mountpoint} " in mounts_output or mounts_output.endswith(f" {instance.final_mountpoint}")
+                    is_fuse_mounted_in_list = f" {instance.config.mount_path} " in mounts_output or mounts_output.endswith(f" {instance.config.mount_path}")
                     
                     is_fuse_connected = False
                     if is_fuse_mounted_in_list:
                         try:
+                            # 仅尝试获取元数据，不读内容，避免 FUSE 挂起导致后端挂起
+                            # 使用低层级的 os.stat 并设置超时（如果可能）
                             os.stat(instance.config.mount_path)
                             is_fuse_connected = True
                         except:
@@ -264,7 +274,14 @@ async def startup_event():
                             instance.status = "stopped"
                     
                     # 4. 更新上传队列大小
-                    instance.upload_queue_size = len(instance.vdrive.upload_queue) if instance.vdrive else 0
+                    if instance.vdrive:
+                        with instance.vdrive.upload_lock:
+                            instance.upload_queue_size = len(instance.vdrive.upload_queue)
+                    else:
+                        instance.upload_queue_size = 0
+                
+                if check_cache:
+                    last_cache_check = now
                     
             except Exception as e:
                 logger.error(f"Status updater error: {e}")
