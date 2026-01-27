@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Virtual Drive 管理控制台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        .glass { background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px); }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* 磁盘卡片样式 */
+        .disk-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .disk-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            border: 1px solid #eee;
+            transition: transform 0.2s;
+        }
+        .disk-card:hover {
+            transform: translateY(-5px);
+        }
+        .disk-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .disk-title {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        .disk-info {
+            font-size: 0.9rem;
+            color: #666;
+            margin-bottom: 8px;
+        }
+        .disk-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        .status-badge {
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        .status-running { background: #e6f7ed; color: #27ae60; }
+        .status-stopped { background: #f8f9fa; color: #6c757d; }
+        .status-error { background: #fff5f5; color: #e74c3c; }
+        .status-starting { background: #fff9db; color: #f08c00; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+    <!-- Sidebar -->
+    <div class="fixed left-0 top-0 h-full w-64 bg-slate-900 text-white p-6 z-10">
+        <h1 class="text-2xl font-bold mb-10 flex items-center">
+            <i class="fas fa-hdd mr-3 text-blue-400"></i>V-Drive
+        </h1>
+        <nav class="space-y-4">
+            <a href="#" onclick="showTab('dashboard')" class="flex items-center p-3 rounded hover:bg-slate-800 transition text-blue-400 bg-slate-800" id="nav-dashboard">
+                <i class="fas fa-chart-line w-6"></i> 仪表盘
+            </a>
+            <a href="#" onclick="showTab('settings')" class="flex items-center p-3 rounded hover:bg-slate-800 transition" id="nav-settings">
+                <i class="fas fa-plus-circle w-6"></i> 新增磁盘
+            </a>
+            <a href="#" onclick="showTab('files')" class="flex items-center p-3 rounded hover:bg-slate-800 transition" id="nav-files">
+                <i class="fas fa-folder-open w-6"></i> 文件缓存
+            </a>
+        </nav>
+        <div class="absolute bottom-10 left-6 text-slate-400 text-sm">
+            v0.1.0-alpha
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="ml-64 p-8">
+        <!-- Dashboard Tab -->
+        <div id="dashboard" class="tab-content active">
+            <h2 class="text-3xl font-bold mb-8 text-slate-800">磁盘列表</h2>
+            <div id="diskList" class="disk-grid">
+                <!-- 磁盘卡片将由 JS 动态生成 -->
+            </div>
+        </div>
+
+        <!-- Settings Tab -->
+        <div id="settings" class="tab-content">
+            <h2 class="text-3xl font-bold mb-8 text-slate-800">挂载设置</h2>
+            <div class="bg-white p-8 rounded-xl shadow-sm border border-slate-100 max-w-2xl">
+                <form class="space-y-6">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-2">存储源类型</label>
+                        <select class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            <option value="webdav">WebDAV (推荐)</option>
+                            <option value="s3">Amazon S3 / 兼容 S3</option>
+                            <option value="local">本地目录 (测试用)</option>
+                        </select>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="md:col-span-2">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">WebDAV 地址</label>
+                            <input type="text" id="dav_url" placeholder="https://dav.alist.tv/dav" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">用户名</label>
+                            <input type="text" id="dav_user" placeholder="admin" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">密码/Token</label>
+                            <input type="password" id="dav_password" placeholder="••••••••" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                    </div>
+
+                    <hr class="border-slate-100">
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="md:col-span-2">
+                            <div class="p-4 bg-blue-50 border border-blue-200 rounded-lg mb-4">
+                                <p class="text-sm text-blue-700 font-medium"><i class="fas fa-microchip mr-2"></i>块级存储模式 (Block-Based Storage)</p>
+                                <p class="text-xs text-blue-600 mt-1">系统将 WebDAV 模拟为一块原始磁盘镜像。你可以像格式化普通硬盘一样对其进行分区和格式化，支持安装任何应用，且不产生 WebDAV 小文件碎片问题。</p>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">虚拟硬盘名称</label>
+                            <input type="text" id="disk_name" value="data_disk" placeholder="例如: my_disk" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">虚拟磁盘总容量 (GB)</label>
+                            <input type="number" id="disk_size_gb" value="100" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">云端分块大小 (MB)</label>
+                            <select id="block_size_mb" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                <option value="1">1 MB</option>
+                                <option value="2">2 MB</option>
+                                <option value="4" selected>4 MB (推荐)</option>
+                                <option value="8">8 MB</option>
+                                <option value="16">16 MB</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">并发同步线程数</label>
+                            <input type="number" id="concurrency" value="5" min="1" max="20" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">最大缓存空间 (GB)</label>
+                            <input type="number" id="max_cache_gb" value="10" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">WebDAV 保存路径</label>
+                            <input type="text" id="remote_path" value="v_disks/data_disk" placeholder="例如: /backups/disks" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">挂载路径 (FUSE 镜像层)</label>
+                            <input type="text" id="mount_path" value="/mnt/v_drive" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">本地缓存目录</label>
+                            <input type="text" id="cache_dir" value="/var/cache/v_drive" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                    </div>
+
+                    <div class="flex items-center">
+                        <input type="checkbox" id="read-only" class="w-4 h-4 text-blue-600 rounded border-slate-300">
+                        <label for="read-only" class="ml-2 text-sm text-slate-600">只读模式 (Read-only)</label>
+                    </div>
+
+                    <button type="button" onclick="saveConfig()" class="bg-blue-600 text-white px-8 py-3 rounded-lg hover:bg-blue-700 transition font-medium">
+                        保存并创建磁盘
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Files Tab -->
+        <div id="files" class="tab-content">
+            <h2 class="text-3xl font-bold mb-8 text-slate-800">文件缓存管理</h2>
+            
+            <!-- Quick Actions -->
+            <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-100 mb-8">
+                <h3 class="text-lg font-bold mb-4">快速操作</h3>
+                <div class="flex space-x-4">
+                    <input type="text" id="action-path" placeholder="输入文件或目录路径 (例如: /movie/test.mp4)" class="flex-1 p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                    <button onclick="cacheAction('prefetch')" class="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition">强制预取</button>
+                    <button onclick="cacheAction('evict')" class="bg-slate-200 text-slate-700 px-6 py-3 rounded-lg hover:bg-slate-300 transition">释放缓存</button>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+                <table class="w-full text-left">
+                    <thead class="bg-slate-50 border-b border-slate-100">
+                        <tr>
+                            <th class="p-4 font-semibold text-slate-600">文件名</th>
+                            <th class="p-4 font-semibold text-slate-600">大小</th>
+                            <th class="p-4 font-semibold text-slate-600">说明</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100" id="file-list">
+                        <tr>
+                            <td colspan="3" class="p-8 text-center text-slate-400">
+                                <i class="fas fa-info-circle mr-2"></i> 提示：虚拟硬盘挂载后，您可以在本地文件管理器中直接操作。
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function showTab(tabId) {
+            // Hide all contents
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            // Show target content
+            document.getElementById(tabId).classList.add('active');
+            
+            // Update Nav styles
+            document.querySelectorAll('nav a').forEach(link => {
+                link.classList.remove('bg-slate-800', 'text-blue-400');
+            });
+            document.getElementById('nav-' + tabId).classList.add('bg-slate-800', 'text-blue-400');
+        }
+
+        const API_BASE = window.location.protocol + '//' + window.location.hostname + ':8001';
+
+        async function saveConfig() {
+            const config = {
+                dav_url: document.getElementById('dav_url').value,
+                dav_user: document.getElementById('dav_user').value,
+                dav_password: document.getElementById('dav_password').value,
+                mount_path: document.getElementById('mount_path').value,
+                cache_dir: document.getElementById('cache_dir').value,
+                disk_name: document.getElementById('disk_name').value,
+                remote_path: document.getElementById('remote_path').value,
+                block_size_mb: parseInt(document.getElementById('block_size_mb').value),
+                disk_size_gb: parseInt(document.getElementById('disk_size_gb').value),
+                max_cache_gb: parseInt(document.getElementById('max_cache_gb').value),
+                concurrency: parseInt(document.getElementById('concurrency').value)
+            };
+            localStorage.setItem('v_drive_config', JSON.stringify(config));
+            
+            try {
+                const response = await fetch(`${API_BASE}/mount`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+                const result = await response.json();
+                alert(result.message || result.detail);
+                fetchDisks();
+                showTab('dashboard');
+            } catch (e) {
+                alert('保存失败: ' + e);
+            }
+        }
+
+        async function fetchDisks() {
+            try {
+                const res = await fetch(`${API_BASE}/disks`);
+                const disks = await res.json();
+                renderDisks(disks);
+            } catch (err) {
+                console.error("Fetch disks failed", err);
+            }
+        }
+
+        function renderDisks(disks) {
+            const container = document.getElementById('diskList');
+            container.innerHTML = '';
+            
+            if (disks.length === 0) {
+                container.innerHTML = `
+                    <div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #999;">
+                        <i class="fas fa-hdd fa-3x mb-3"></i>
+                        <p>暂无配置的磁盘，请前往“新增磁盘”添加</p>
+                    </div>`;
+                return;
+            }
+
+            disks.forEach(disk => {
+                const card = document.createElement('div');
+                card.className = 'disk-card';
+                const statusClass = `status-${disk.status}`;
+                const cacheMB = (disk.cache_usage_bytes / 1024 / 1024).toFixed(1);
+                
+                card.innerHTML = `
+                    <div class="disk-header">
+                        <span class="disk-title"><i class="fas fa-hdd mr-2"></i>${disk.disk_name}</span>
+                        <span class="status-badge ${statusClass}">${disk.status === 'running' ? '运行中' : (disk.status === 'stopped' ? '已停止' : '状态异常')}</span>
+                    </div>
+                    <div class="disk-info">容量: ${disk.config.disk_size_gb} GB</div>
+                    <div class="disk-info">FUSE挂载: ${disk.config.mount_path}</div>
+                    <div class="disk-info">并发同步: ${disk.config.concurrency || 5} 线程</div>
+                    <div class="disk-info">系统挂载: ${disk.final_mountpoint} (${disk.loop_status === 'mounted' ? '已挂载' : '未挂载'})</div>
+                    <div class="disk-info">本地缓存: ${cacheMB} MB / ${disk.config.max_cache_gb} GB</div>
+                    <div class="disk-info">待上传: ${disk.upload_queue_size} 块</div>
+                    ${disk.error_msg ? `<div class="disk-info" style="color:red">错误: ${disk.error_msg}</div>` : ''}
+                    
+                    <div class="disk-actions">
+                        ${disk.status !== 'running' ? 
+                            `<button onclick="mountDisk('${disk.disk_name}')" class="bg-blue-600 text-white px-3 py-1 rounded text-sm hover:bg-blue-700 transition">启动</button>` :
+                            `<button onclick="unmountDisk('${disk.disk_name}')" class="bg-slate-500 text-white px-3 py-1 rounded text-sm hover:bg-slate-600 transition">卸载</button>`
+                        }
+                        <button onclick="editDisk('${disk.disk_name}')" class="border border-slate-200 px-3 py-1 rounded text-sm hover:bg-slate-50 transition">配置</button>
+                        <button onclick="deleteDisk('${disk.disk_name}')" class="bg-red-500 text-white px-3 py-1 rounded text-sm hover:bg-red-600 transition">删除</button>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        async function mountDisk(name) {
+             const res = await fetch(`${API_BASE}/disks`);
+             const disks = await res.json();
+             const disk = disks.find(d => d.disk_name === name);
+             if (disk) {
+                 try {
+                     const response = await fetch(`${API_BASE}/mount`, {
+                         method: 'POST',
+                         headers: {'Content-Type': 'application/json'},
+                         body: JSON.stringify(disk.config)
+                     });
+                     const result = await response.json();
+                     alert(result.message || result.detail);
+                     fetchDisks();
+                 } catch (e) {
+                     alert('启动失败: ' + e);
+                 }
+             }
+         }
+
+         function editDisk(name) {
+             fetch(`${API_BASE}/disks`)
+                 .then(res => res.json())
+                 .then(disks => {
+                     const disk = disks.find(d => d.disk_name === name);
+                     if (disk) {
+                         document.getElementById('dav_url').value = disk.config.dav_url;
+                         document.getElementById('dav_user').value = disk.config.dav_user;
+                         document.getElementById('dav_password').value = disk.config.dav_password;
+                         document.getElementById('mount_path').value = disk.config.mount_path;
+                         document.getElementById('cache_dir').value = disk.config.cache_dir;
+                         document.getElementById('disk_name').value = disk.config.disk_name;
+                         document.getElementById('remote_path').value = disk.config.remote_path;
+                         document.getElementById('block_size_mb').value = disk.config.block_size_mb;
+                         document.getElementById('disk_size_gb').value = disk.config.disk_size_gb;
+                         document.getElementById('max_cache_gb').value = disk.config.max_cache_gb;
+                         document.getElementById('concurrency').value = disk.config.concurrency || 5;
+                         showTab('settings');
+                     }
+                 });
+         }
+
+        async function unmountDisk(name) {
+            if (!confirm(`确定要卸载磁盘 ${name} 吗？`)) return;
+            try {
+                const res = await fetch(`${API_BASE}/unmount/${encodeURIComponent(name)}`, { method: 'POST' });
+                const data = await res.json();
+                alert(data.message || data.detail);
+                fetchDisks();
+            } catch (err) {
+                alert("卸载失败: " + err);
+            }
+        }
+
+        async function deleteDisk(name) {
+            if (!confirm(`确定要彻底删除磁盘 ${name} 的配置吗？（本地数据和远程数据不会被删除）`)) return;
+            try {
+                const res = await fetch(`${API_BASE}/disks/${encodeURIComponent(name)}`, { method: 'DELETE' });
+                const data = await res.json();
+                alert(data.message || data.detail);
+                fetchDisks();
+            } catch (err) {
+                alert("删除失败: " + err);
+            }
+        }
+
+        async function cacheAction(type) {
+            const path = document.getElementById('action-path').value;
+            if (!path) {
+                alert('请输入路径');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/cache/${type}?path=${encodeURIComponent(path)}`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                if (result.success) {
+                    alert('操作成功');
+                } else {
+                    alert('操作失败，请检查路径');
+                }
+            } catch (e) {
+                alert('请求失败: ' + e);
+            }
+        }
+
+        // 加载保存的配置
+        function loadConfig() {
+            const saved = localStorage.getItem('v_drive_config');
+            if (saved) {
+                const config = JSON.parse(saved);
+                if (config.dav_url) document.getElementById('dav_url').value = config.dav_url;
+                if (config.dav_user) document.getElementById('dav_user').value = config.dav_user;
+                if (config.dav_password) document.getElementById('dav_password').value = config.dav_password;
+                if (config.mount_path) document.getElementById('mount_path').value = config.mount_path;
+                if (config.cache_dir) document.getElementById('cache_dir').value = config.cache_dir;
+                if (config.disk_name) document.getElementById('disk_name').value = config.disk_name;
+                if (config.remote_path) document.getElementById('remote_path').value = config.remote_path;
+                if (config.block_size_mb) document.getElementById('block_size_mb').value = config.block_size_mb;
+                if (config.disk_size_gb) document.getElementById('disk_size_gb').value = config.disk_size_gb;
+                if (config.max_cache_gb) document.getElementById('max_cache_gb').value = config.max_cache_gb;
+                if (config.concurrency) document.getElementById('concurrency').value = config.concurrency;
+            }
+        }
+
+        // 轮询更新状态
+        setInterval(fetchDisks, 3000);
+        fetchDisks();
+        loadConfig();
+    </script>
+</body>
+</html>

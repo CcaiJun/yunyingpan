@@ -1,0 +1,30 @@
+# Configuration and Secrets
+disks_config.json
+
+# Logs
+*.log
+logs/
+
+# Databases
+*.db
+*.db-journal
+
+# Virtual Disk Images
+*.img
+
+# Python environment and cache
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project specific caches and mount points
+/var/cache/v_drive/
+/mnt/pan/
+/mnt/v_disks/
