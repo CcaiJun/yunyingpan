@@ -1,9 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 import os
 import threading
 import logging
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from v_drive import VDrive, FUSE
 import psutil
 
@@ -16,6 +18,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -68,30 +71,95 @@ disks: Dict[str, DiskInstance] = {}
 for cfg_dict in load_configs():
     try:
         cfg = MountConfig(**cfg_dict)
-        disks[cfg.disk_name] = DiskInstance(cfg)
+        instance = DiskInstance(cfg)
+        
+        # 自动检测是否已经在运行
+        if os.path.ismount(instance.final_mountpoint):
+            instance.status = "running"
+            logger.info(f"Detected existing mount for disk {cfg.disk_name}, setting status to running")
+        
+        disks[cfg.disk_name] = instance
     except:
         pass
 
+@app.on_event("startup")
+async def startup_event():
+    logger.info("FastAPI Backend Starting Up...")
+    logger.info(f"Registered routes: {[route.path for route in app.routes]}")
+
+# 静态文件路由
+@app.get("/", response_class=HTMLResponse)
+async def read_index():
+    index_path = os.path.join(os.path.dirname(__file__), "index.html")
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return "index.html not found"
+
+@app.get("/favicon.ico")
+async def favicon():
+    return FileResponse("favicon.ico")
+
 @app.get("/disks")
 def list_disks():
+    logger.info("Received request to /disks")
     result = []
+    # 获取当前系统的所有挂载点，避免在循环中多次调用
+    try:
+        import subprocess
+        res = subprocess.run(['mount'], capture_output=True, text=True, timeout=5)
+        mounts_output = res.stdout
+    except Exception as e:
+        logger.error(f"Failed to get mount list: {e}")
+        mounts_output = ""
+
     for name, instance in disks.items():
         total_size = 0
-        if os.path.exists(instance.config.cache_dir):
-            for root, dirs, files in os.walk(instance.config.cache_dir):
-                for f in files:
-                    if f.startswith(instance.config.disk_name):
-                        try: total_size += os.path.getsize(os.path.join(root, f))
-                        except: pass
-        
-        loop_status = "unmounted"
         try:
-            import subprocess
-            res = subprocess.run(['mount'], capture_output=True, text=True)
-            if instance.final_mountpoint in res.stdout:
-                loop_status = "mounted"
-        except: pass
-
+            if os.path.exists(instance.config.cache_dir):
+                # 只统计当前磁盘的文件
+                for f in os.listdir(instance.config.cache_dir):
+                    if f.startswith(instance.config.disk_name):
+                        try:
+                            f_path = os.path.join(instance.config.cache_dir, f)
+                            # 增加对 cache 目录本身是否断开的检测（虽然概率低）
+                            if os.path.isfile(f_path):
+                                total_size += os.path.getsize(f_path)
+                        except: pass
+        except Exception as e:
+            logger.error(f"Error calculating cache size for {name}: {e}")
+        
+        # 实时检测挂载状态 - 使用 grep 替代直接检查 mounts_output 字符串，确保匹配准确
+        import re
+        is_loop_mounted = bool(re.search(rf"\s{re.escape(instance.final_mountpoint)}\s", mounts_output))
+        is_fuse_mounted_in_list = bool(re.search(rf"\s{re.escape(instance.config.mount_path)}\s", mounts_output))
+        
+        # 针对 FUSE 挂载点，检查是否发生 "Transport endpoint is not connected"
+        is_fuse_connected = False
+        if is_fuse_mounted_in_list:
+            try:
+                # 使用 os.stat 检查挂载点是否正常，设置极短超时
+                # 注意：os.stat 没有 timeout 参数，我们已经在 get_mounts 层面做了保护
+                # 这里通过 listdir 一个空路径或 stat 检查
+                os.stat(instance.config.mount_path)
+                is_fuse_connected = True
+            except:
+                logger.warning(f"FUSE mount point {instance.config.mount_path} is disconnected")
+                is_fuse_connected = False
+        
+        if is_loop_mounted and is_fuse_connected:
+            loop_status = "mounted"
+            instance.status = "running"
+            instance.error_msg = "" # 清除之前的错误
+        elif is_loop_mounted:
+            loop_status = "mounted"
+            instance.status = "error"
+            instance.error_msg = "FUSE 层连接断开 (Transport endpoint not connected)"
+        else:
+            loop_status = "unmounted"
+            if instance.status == "running":
+                instance.status = "stopped"
+        
         result.append({
             "disk_name": name,
             "status": instance.status,

@@ -235,7 +235,8 @@
             document.getElementById('nav-' + tabId).classList.add('bg-slate-800', 'text-blue-400');
         }
 
-        const API_BASE = window.location.protocol + '//' + window.location.hostname + ':8001';
+        // 整合后，API 就在同一个端口上，直接使用相对路径
+        const API_BASE = window.location.origin;
 
         async function saveConfig() {
             const config = {
@@ -270,11 +271,35 @@
 
         async function fetchDisks() {
             try {
-                const res = await fetch(`${API_BASE}/disks`);
+                // 使用相对路径，解决所有跨域和 IP 映射问题
+                const url = `/disks?t=` + new Date().getTime();
+                console.log("Fetching from:", url);
+                
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000); // 增加到 10 秒超时
+
+                const res = await fetch(url, {
+                    cache: 'no-cache',
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+
+                if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
                 const disks = await res.json();
                 renderDisks(disks);
             } catch (err) {
-                console.error("Fetch disks failed", err);
+                console.error("Fetch disks failed:", err);
+                
+                document.getElementById('diskList').innerHTML = `
+                    <div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #e74c3c;">
+                        <i class="fas fa-exclamation-triangle fa-3x mb-3"></i>
+                        <p>无法连接到后端服务 (${window.location.host})</p>
+                        <p class="text-sm mt-2">错误详情: ${err.name === 'AbortError' ? '请求超时 (10s)' : err.message}</p>
+                        <div class="mt-4 space-x-2">
+                            <button onclick="fetchDisks()" class="bg-slate-200 px-4 py-2 rounded text-slate-700 hover:bg-slate-300">手动重试</button>
+                            <button onclick="window.location.reload()" class="bg-blue-600 px-4 py-2 rounded text-white hover:bg-blue-700">刷新页面</button>
+                        </div>
+                    </div>`;
             }
         }
 
