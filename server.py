@@ -398,6 +398,18 @@ async def startup_event():
     
     threading.Thread(target=auto_reconnect, daemon=True).start()
 
+    # 自动挂载所有配置好的磁盘
+    def auto_mount_all():
+        time.sleep(3) # 等待网络稳定
+        logger.info("Auto-mounting all configured disks...")
+        for name, instance in disks.items():
+            if instance.status != "running":
+                logger.info(f"Auto-mounting disk {name}...")
+                threading.Thread(target=do_mount, args=(instance,), daemon=True).start()
+                time.sleep(1) # 稍微错开启动时间
+    
+    threading.Thread(target=auto_mount_all, daemon=True).start()
+
 # 静态文件路由
 @app.get("/", response_class=HTMLResponse)
 async def read_index():

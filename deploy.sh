@@ -30,10 +30,15 @@ apt-get install -y python3 python3-pip python3-venv fuse3 e2fsprogs jq lsof psmi
 # 4. 加载内核模块
 echo "正在加载内核模块 (FUSE & NBD)..."
 modprobe fuse || echo "警告：无法加载 fuse 模块。"
-# 尝试加载 nbd 模块，并设置较大的设备数量
 if ! lsmod | grep -q "^nbd"; then
     modprobe nbd nbds_max=128 || echo "警告：无法加载 nbd 模块。"
 fi
+
+# 确保开机自动加载模块
+echo "正在配置开机自动加载模块..."
+echo "fuse" > /etc/modules-load.d/yingpan.conf
+echo "nbd" >> /etc/modules-load.d/yingpan.conf
+echo "options nbd nbds_max=128" > /etc/modprobe.d/nbd.conf
 
 # 5. 配置 FUSE
 if [ -f /etc/fuse.conf ]; then
