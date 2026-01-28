@@ -60,6 +60,30 @@
         .status-stopped { background: #f8f9fa; color: #6c757d; }
         .status-error { background: #fff5f5; color: #e74c3c; }
         .status-starting { background: #fff9db; color: #f08c00; }
+        
+        /* Modal 样式 */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 100;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+            backdrop-filter: blur(4px);
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: 5vh auto;
+            padding: 0;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 700px;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+        }
     </style>
 </head>
 <body class="bg-slate-50 min-h-screen">
@@ -74,9 +98,6 @@
             </a>
             <a href="#" onclick="showTab('settings')" class="flex items-center p-3 rounded hover:bg-slate-800 transition" id="nav-settings">
                 <i class="fas fa-plus-circle w-6"></i> 新增磁盘
-            </a>
-            <a href="#" onclick="showTab('files')" class="flex items-center p-3 rounded hover:bg-slate-800 transition" id="nav-files">
-                <i class="fas fa-folder-open w-6"></i> 文件缓存
             </a>
         </nav>
         <div class="absolute bottom-10 left-6 text-slate-400 text-sm">
@@ -204,38 +225,120 @@
                 </form>
             </div>
         </div>
+    </div>
 
-        <!-- Files Tab -->
-        <div id="files" class="tab-content">
-            <h2 class="text-3xl font-bold mb-8 text-slate-800">文件缓存管理</h2>
-            
-            <!-- Quick Actions -->
-            <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-100 mb-8">
-                <h3 class="text-lg font-bold mb-4">快速操作</h3>
-                <div class="flex space-x-4">
-                    <input type="text" id="action-path" placeholder="输入文件或目录路径 (例如: /movie/test.mp4)" class="flex-1 p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
-                    <button onclick="cacheAction('prefetch')" class="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition">强制预取</button>
-                    <button onclick="cacheAction('evict')" class="bg-slate-200 text-slate-700 px-6 py-3 rounded-lg hover:bg-slate-300 transition">释放缓存</button>
-                </div>
+    <!-- Edit Disk Modal -->
+    <div id="editModal" class="modal">
+        <div class="modal-content">
+            <div class="flex justify-between items-center p-6 border-b border-slate-100">
+                <h2 class="text-xl font-bold text-slate-800">磁盘配置</h2>
+                <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 transition">
+                    <i class="fas fa-times text-xl"></i>
+                </button>
             </div>
+            <div class="p-6">
+                <form id="editForm" class="space-y-6">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-2">存储源类型</label>
+                        <select id="edit_storage_type" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            <option value="webdav">WebDAV (推荐)</option>
+                            <option value="s3">Amazon S3 / 兼容 S3</option>
+                            <option value="local">本地目录 (测试用)</option>
+                        </select>
+                    </div>
 
-            <div class="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
-                <table class="w-full text-left">
-                    <thead class="bg-slate-50 border-b border-slate-100">
-                        <tr>
-                            <th class="p-4 font-semibold text-slate-600">文件名</th>
-                            <th class="p-4 font-semibold text-slate-600">大小</th>
-                            <th class="p-4 font-semibold text-slate-600">说明</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-100" id="file-list">
-                        <tr>
-                            <td colspan="3" class="p-8 text-center text-slate-400">
-                                <i class="fas fa-info-circle mr-2"></i> 提示：虚拟硬盘挂载后，您可以在本地文件管理器中直接操作。
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="md:col-span-2">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">WebDAV 地址</label>
+                            <input type="text" id="edit_dav_url" placeholder="https://dav.alist.tv/dav" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">用户名</label>
+                            <input type="text" id="edit_dav_user" placeholder="admin" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">密码/Token</label>
+                            <input type="password" id="edit_dav_password" placeholder="••••••••" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                    </div>
+
+                    <hr class="border-slate-100">
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">虚拟硬盘名称</label>
+                            <input type="text" id="edit_disk_name" disabled class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed outline-none" title="磁盘创建后，此项不可修改">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">虚拟磁盘总容量 (GB)</label>
+                            <input type="number" id="edit_disk_size_gb" disabled class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed outline-none" title="磁盘创建后，此项不可修改">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">云端分块大小 (MB)</label>
+                            <select id="edit_block_size_mb" disabled class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed outline-none" title="磁盘创建后，此项不可修改">
+                                <option value="1">1 MB</option>
+                                <option value="2">2 MB</option>
+                                <option value="4">4 MB</option>
+                                <option value="8">8 MB</option>
+                                <option value="16">16 MB</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">驱动模式 (Driver Mode)</label>
+                            <select id="edit_driver_mode" disabled class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed outline-none" title="磁盘创建后，此项不可修改">
+                                <option value="fuse">FUSE (兼容性好)</option>
+                                <option value="nbd">NBD (高性能/推荐)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">并发同步线程数</label>
+                            <input type="number" id="edit_concurrency" min="1" max="20" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">最大缓存空间 (GB)</label>
+                            <input type="number" id="edit_max_cache_gb" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">Inode 比例 (字节/Inode)</label>
+                            <select id="edit_inode_ratio" disabled class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed outline-none" title="磁盘创建后，此项不可修改">
+                                <option value="4096">4 KB (极多小文件)</option>
+                                <option value="16384">16 KB</option>
+                                <option value="65536">64 KB</option>
+                                <option value="262144">256 KB</option>
+                                <option value="1048576">1 MB (大文件)</option>
+                                <option value="4194304">4 MB (默认-极快启动)</option>
+                                <option value="16777216">16 MB (超大文件)</option>
+                                <option value="67108864">64 MB (蓝光/视频专用)</option>
+                            </select>
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">WebDAV 保存路径</label>
+                            <input type="text" id="edit_remote_path" disabled class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed outline-none" title="磁盘创建后，此项不可修改">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">挂载路径 (FUSE 镜像层)</label>
+                            <input type="text" id="edit_mount_path" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">本地缓存目录</label>
+                            <input type="text" id="edit_cache_dir" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                    </div>
+
+                    <div class="flex items-center">
+                        <input type="checkbox" id="edit_read_only" class="w-4 h-4 text-blue-600 rounded border-slate-300">
+                        <label for="edit_read_only" class="ml-2 text-sm text-slate-600">只读模式 (Read-only)</label>
+                    </div>
+
+                    <div class="flex justify-end gap-3 mt-8">
+                        <button type="button" onclick="closeModal()" class="px-6 py-2 border border-slate-200 rounded-lg hover:bg-slate-50 transition text-slate-600 font-medium">
+                            取消
+                        </button>
+                        <button type="button" onclick="updateConfig()" class="bg-blue-600 text-white px-8 py-2 rounded-lg hover:bg-blue-700 transition font-medium">
+                            保存修改
+                        </button>
+                    </div>
+                </form>
             </div>
         </div>
     </div>
@@ -243,12 +346,8 @@
     <script>
         function showTab(tabId) {
             if (tabId === 'settings') {
-                // 如果是手动点击导航栏进入设置，则视为“创建新磁盘”，重置表单状态
-                // 除非是从 editDisk 函数触发的
-                const diskNameInput = document.getElementById('disk_name');
-                if (diskNameInput && !diskNameInput.disabled) {
-                    resetSettingsForm();
-                }
+                // 手动点击导航栏进入设置，重置表单为创建模式
+                resetSettingsForm();
             }
             // Hide all contents
             document.querySelectorAll('.tab-content').forEach(tab => {
@@ -438,38 +537,71 @@
                  .then(disks => {
                      const disk = disks.find(d => d.disk_name === name);
                      if (disk) {
-                         document.getElementById('dav_url').value = disk.config.dav_url;
-                         document.getElementById('dav_user').value = disk.config.dav_user;
-                         document.getElementById('dav_password').value = disk.config.dav_password;
-                         document.getElementById('mount_path').value = disk.config.mount_path;
-                         document.getElementById('cache_dir').value = disk.config.cache_dir;
-                         document.getElementById('disk_name').value = disk.config.disk_name;
-                         document.getElementById('remote_path').value = disk.config.remote_path;
-                         document.getElementById('block_size_mb').value = disk.config.block_size_mb;
-                         document.getElementById('disk_size_gb').value = disk.config.disk_size_gb;
-                         document.getElementById('max_cache_gb').value = disk.config.max_cache_gb;
-                         document.getElementById('concurrency').value = disk.config.concurrency || 5;
-                         document.getElementById('inode_ratio').value = disk.config.inode_ratio || 4194304;
-                         document.getElementById('driver_mode').value = disk.config.driver_mode || "fuse";
-                         
-                         // 锁定不可更改的属性
-                        const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb', 'inode_ratio', 'driver_mode'];
-                         lockedFields.forEach(id => {
-                             const el = document.getElementById(id);
-                             if (el) {
-                                 el.disabled = true;
-                                 el.classList.add('bg-slate-50', 'text-slate-500', 'cursor-not-allowed');
-                                 el.title = "磁盘创建后，此项不可修改（修改会导致数据损坏）";
-                             }
-                         });
-                         
-                         // 修改保存按钮文字
-                         const saveBtn = document.querySelector('button[onclick="saveConfig()"]');
-                         if (saveBtn) saveBtn.textContent = "更新配置";
-                         
-                         showTab('settings');
+                         document.getElementById('edit_dav_url').value = disk.config.dav_url;
+                         document.getElementById('edit_dav_user').value = disk.config.dav_user;
+                         document.getElementById('edit_dav_password').value = disk.config.dav_password;
+                         document.getElementById('edit_mount_path').value = disk.config.mount_path;
+                         document.getElementById('edit_cache_dir').value = disk.config.cache_dir;
+                         document.getElementById('edit_disk_name').value = disk.config.disk_name;
+                         document.getElementById('edit_remote_path').value = disk.config.remote_path;
+                         document.getElementById('edit_block_size_mb').value = disk.config.block_size_mb;
+                         document.getElementById('edit_disk_size_gb').value = disk.config.disk_size_gb;
+                         document.getElementById('edit_max_cache_gb').value = disk.config.max_cache_gb;
+                          document.getElementById('edit_concurrency').value = disk.config.concurrency || 5;
+                          document.getElementById('edit_inode_ratio').value = disk.config.inode_ratio || 4194304;
+                          document.getElementById('edit_driver_mode').value = disk.config.driver_mode || "fuse";
+                          document.getElementById('edit_read_only').checked = disk.config.read_only || false;
+                          
+                          document.getElementById('editModal').style.display = 'block';
+                         document.body.style.overflow = 'hidden'; // 防止背景滚动
                      }
                  });
+         }
+
+         function closeModal() {
+             document.getElementById('editModal').style.display = 'none';
+             document.body.style.overflow = 'auto';
+         }
+
+         // 点击弹窗外部关闭
+         window.onclick = function(event) {
+             const modal = document.getElementById('editModal');
+             if (event.target == modal) {
+                 closeModal();
+             }
+         }
+
+         async function updateConfig() {
+             const config = {
+                 dav_url: document.getElementById('edit_dav_url').value,
+                 dav_user: document.getElementById('edit_dav_user').value,
+                 dav_password: document.getElementById('edit_dav_password').value,
+                 mount_path: document.getElementById('edit_mount_path').value,
+                 cache_dir: document.getElementById('edit_cache_dir').value,
+                 disk_name: document.getElementById('edit_disk_name').value,
+                 remote_path: document.getElementById('edit_remote_path').value,
+                 block_size_mb: parseInt(document.getElementById('edit_block_size_mb').value),
+                 disk_size_gb: parseInt(document.getElementById('edit_disk_size_gb').value),
+                  max_cache_gb: parseInt(document.getElementById('edit_max_cache_gb').value),
+                  concurrency: parseInt(document.getElementById('edit_concurrency').value),
+                  inode_ratio: parseInt(document.getElementById('edit_inode_ratio').value),
+                  driver_mode: document.getElementById('edit_driver_mode').value,
+                  read_only: document.getElementById('edit_read_only').checked
+              };
+             
+             try {
+                 const response = await fetch(`${API_BASE}/mount`, {
+                     method: 'POST',
+                     headers: {'Content-Type': 'application/json'},
+                     body: JSON.stringify(config)
+                 });
+                 const result = await response.json();
+                 alert(result.message || result.detail);
+                 closeModal();
+                 fetchDisks();
+             } catch (e) {
+                 alert('更新失败: ' + e);
+             }
          }
 
          function resetSettingsForm() {
@@ -520,28 +652,6 @@
                 fetchDisks();
             } catch (err) {
                 alert("删除失败: " + err);
-            }
-        }
-
-        async function cacheAction(type) {
-            const path = document.getElementById('action-path').value;
-            if (!path) {
-                alert('请输入路径');
-                return;
-            }
-            
-            try {
-                const response = await fetch(`${API_BASE}/cache/${type}?path=${encodeURIComponent(path)}`, {
-                    method: 'POST'
-                });
-                const result = await response.json();
-                if (result.success) {
-                    alert('操作成功');
-                } else {
-                    alert('操作失败，请检查路径');
-                }
-            } catch (e) {
-                alert('请求失败: ' + e);
             }
         }
 
