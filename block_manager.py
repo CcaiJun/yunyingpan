@@ -139,8 +139,9 @@ class BlockManager:
         self.remote_path = remote_path.strip('/')
         self.concurrency = concurrency
         self.compression = compression
+        self.dav_lock = threading.Lock()
         
-        # 压缩器初始化
+        # 速率限制器压缩器初始化
         if self.compression == "zstd":
             self.cctx = zstd.ZstdCompressor(level=3)
             self.dctx = zstd.ZstdDecompressor()
@@ -254,7 +255,8 @@ class BlockManager:
                         if self._is_all_zeros(block_path):
                             if remote_exists:
                                 try:
-                                    self.client.remove(remote_file_path)
+                                    with self.dav_lock:
+                                        self.client.remove(remote_file_path)
                                     self.db.set_block_status(block_id, 'cached', remote_exists=0)
                                 except: pass
                             else:
@@ -267,7 +269,9 @@ class BlockManager:
                                     current = ""
                                     for part in parts:
                                         current = f"{current}/{part}".strip('/')
-                                        try: self.client.mkdir(current)
+                                        try:
+                                            with self.dav_lock:
+                                                self.client.mkdir(current)
                                         except: pass
                                     self._remote_dirs_checked = True
                         try:
@@ -290,7 +294,8 @@ class BlockManager:
                                     
                                     # 处理压缩逻辑
                                     if self.compression == "none":
-                                        self.client.upload_file(block_path, remote_file_path, overwrite=True, callback=upload_callback)
+                                        with self.dav_lock:
+                                            self.client.upload_file(block_path, remote_file_path, overwrite=True, callback=upload_callback)
                                     else:
                                         with open(block_path, 'rb') as f:
                                             raw_data = f.read()
@@ -304,7 +309,8 @@ class BlockManager:
                                         # 上传内存中的压缩数据
                                         import io
                                         data_stream = io.BytesIO(processed_data)
-                                        self.client.upload_fileobj(data_stream, remote_file_path, overwrite=True, callback=upload_callback)
+                                        with self.dav_lock:
+                                            self.client.upload_fileobj(data_stream, remote_file_path, overwrite=True, callback=upload_callback)
                                     
                                     self.db.set_block_status(block_id, 'cached', remote_exists=1)
                                     break
@@ -357,7 +363,9 @@ class BlockManager:
             block_path = self._get_block_path(block_id)
             status, remote_exists = self.db.get_block_info(block_id)
             if not os.path.exists(block_path):
-                if self.use_remote and (remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat")):
+                with self.dav_lock:
+                    remote_exists_check = remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat")
+                if self.use_remote and remote_exists_check:
                     try:
                         with self.downloading_lock: self.downloading_count += 1
                         
@@ -372,11 +380,13 @@ class BlockManager:
                             last_transferred = transferred
                         
                         if self.compression == "none":
-                            self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path, callback=download_callback)
+                            with self.dav_lock:
+                                self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path, callback=download_callback)
                         else:
                             import io
                             data_stream = io.BytesIO()
-                            self.client.download_fileobj(f"{self.remote_path}/blk_{block_id:08d}.dat", data_stream, callback=download_callback)
+                            with self.dav_lock:
+                                self.client.download_fileobj(f"{self.remote_path}/blk_{block_id:08d}.dat", data_stream, callback=download_callback)
                             compressed_data = data_stream.getvalue()
                             
                             if self.compression == "zstd":
@@ -390,7 +400,7 @@ class BlockManager:
                             with open(block_path, 'wb') as f:
                                 f.write(raw_data)
 
-                                self.db.set_block_status(block_id, 'cached', remote_exists=1)
+                        self.db.set_block_status(block_id, 'cached', remote_exists=1)
                     except Exception as e:
                         logger.error(f"Download block {block_id} failed: {e}")
                         result[bytes_read:bytes_read+chunk_len] = b'\x00' * chunk_len
@@ -428,7 +438,9 @@ class BlockManager:
             block_path = self._get_block_path(block_id)
             status, remote_exists = self.db.get_block_info(block_id)
             if not os.path.exists(block_path):
-                if self.use_remote and (remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat")):
+                with self.dav_lock:
+                    remote_exists_check = remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat")
+                if self.use_remote and remote_exists_check:
                     try:
                         with self.downloading_lock: self.downloading_count += 1
                         
@@ -443,11 +455,13 @@ class BlockManager:
                             last_transferred = transferred
                         
                         if self.compression == "none":
-                            self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path, callback=download_callback)
+                            with self.dav_lock:
+                                self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path, callback=download_callback)
                         else:
                             import io
                             data_stream = io.BytesIO()
-                            self.client.download_fileobj(f"{self.remote_path}/blk_{block_id:08d}.dat", data_stream, callback=download_callback)
+                            with self.dav_lock:
+                                self.client.download_fileobj(f"{self.remote_path}/blk_{block_id:08d}.dat", data_stream, callback=download_callback)
                             compressed_data = data_stream.getvalue()
                             
                             if self.compression == "zstd":
@@ -461,9 +475,13 @@ class BlockManager:
                             with open(block_path, 'wb') as f:
                                 f.write(raw_data)
 
-                                self.db.set_block_status(block_id, 'cached', remote_exists=1)
-                    except:
-                        pass
+                        self.db.set_block_status(block_id, 'cached', remote_exists=1)
+                    except Exception as e:
+                        logger.error(f"Download/Decompress block {block_id} failed during write: {e}")
+                        # 如果下载失败且本地文件也不存在，我们需要创建一个空文件以防后续 open(r+b) 失败
+                        if not os.path.exists(block_path):
+                            with open(block_path, 'wb') as f:
+                                f.truncate(self.block_size)
                     finally:
                         with self.downloading_lock: self.downloading_count -= 1
                 else:

@@ -77,6 +77,9 @@ def save_configs(configs: List[dict]):
     with open(CONFIG_FILE, 'w') as f:
         json.dump(configs, f, indent=4)
 
+# 全局锁，防止 NBD 设备分配竞争
+global_nbd_lock = threading.Lock()
+
 def do_mount(inst: DiskInstance):
     if inst.status == "starting":
         return
@@ -175,20 +178,28 @@ def do_mount(inst: DiskInstance):
             inst.thread = threading.Thread(target=start_nbd, daemon=True)
             inst.thread.start()
             
-            # 寻找空闲 NBD 设备
-            nbd_dev = None
-            for i in range(16):
-                dev = f"/dev/nbd{i}"
-                if subprocess.run(['nbd-client', '-check', dev], capture_output=True).returncode != 0:
-                    nbd_dev = dev
-                    break
-            if not nbd_dev: raise Exception("没有可用的 NBD 设备")
+            # 寻找空闲 NBD 设备并连接
+            with global_nbd_lock:
+                nbd_dev = None
+                for i in range(16):
+                    dev = f"/dev/nbd{i}"
+                    # 检查是否已经挂载或正在被 nbd-client 使用
+                    check_res = subprocess.run(['nbd-client', '-check', dev], capture_output=True)
+                    if check_res.returncode != 0:
+                        # 额外检查 mount 列表
+                        mount_check = subprocess.run(['mount'], capture_output=True, text=True)
+                        if dev not in mount_check.stdout:
+                            nbd_dev = dev
+                            break
+                
+                if not nbd_dev: raise Exception("没有可用的 NBD 设备")
+                
+                inst.nbd_device = nbd_dev
+                time.sleep(1) # 等待 server 启动
+                
+                # 连接 NBD 客户端 (在锁内连接以防竞争)
+                subprocess.run(['nbd-client', '127.0.0.1', str(port), nbd_dev, '-N', 'default', '-g'], check=True)
             
-            inst.nbd_device = nbd_dev
-            time.sleep(1) # 等待 server 启动
-            
-            # 连接 NBD 客户端 (指定 export name 以兼容部分客户端，-g 尝试禁用 NBD_OPT_GO)
-            subprocess.run(['nbd-client', '127.0.0.1', str(port), nbd_dev, '-N', 'default', '-g'], check=True)
             target_path = nbd_dev
             mount_cmd = ['mount', nbd_dev, inst.final_mountpoint]
 
