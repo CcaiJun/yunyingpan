@@ -208,6 +208,15 @@
                             </select>
                             <p class="text-[10px] text-slate-500 mt-1">比例越大，启动和格式化越快，但能存的文件数越少。</p>
                         </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">压缩算法 (Compression)</label>
+                            <select id="compression" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                <option value="none" selected>不压缩 (最高性能)</option>
+                                <option value="zstd">Zstd (推荐-兼顾压缩率与速度)</option>
+                                <option value="lz4">LZ4 (极速-适合弱CPU环境)</option>
+                            </select>
+                            <p class="text-[10px] text-slate-500 mt-1">开启压缩可显著减少云端占用和上传流量。</p>
+                        </div>
                         <div class="md:col-span-2">
                             <label class="block text-sm font-medium text-slate-700 mb-2">WebDAV 保存路径</label>
                             <input type="text" id="remote_path" value="v_disks/data_disk" placeholder="例如: /backups/disks" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
@@ -327,6 +336,14 @@
                                 <option value="67108864">64 MB (蓝光/视频专用)</option>
                             </select>
                         </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">压缩算法 (Compression)</label>
+                            <select id="edit_compression" disabled class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed outline-none" title="磁盘创建后，此项不可修改">
+                                <option value="none">不压缩 (最高性能)</option>
+                                <option value="zstd">Zstd (推荐-兼顾压缩率与速度)</option>
+                                <option value="lz4">LZ4 (极速-适合弱CPU环境)</option>
+                            </select>
+                        </div>
                         <div class="md:col-span-2">
                             <label class="block text-sm font-medium text-slate-700 mb-2">WebDAV 保存路径</label>
                             <input type="text" id="edit_remote_path" disabled class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed outline-none" title="磁盘创建后，此项不可修改">
@@ -383,7 +400,6 @@
         const API_BASE = window.location.origin;
 
         async function saveConfig() {
-            // 获取表单值时，即使 disabled 也要获取值（或者从原始对象获取）
             const config = {
                 dav_url: document.getElementById('dav_url').value,
                 dav_user: document.getElementById('dav_user').value,
@@ -399,7 +415,9 @@
                 download_limit_kb: parseInt(document.getElementById('download_limit_kb').value || 0),
                 concurrency: parseInt(document.getElementById('concurrency').value),
                 inode_ratio: parseInt(document.getElementById('inode_ratio').value),
-                driver_mode: document.getElementById('driver_mode').value
+                compression: document.getElementById('compression').value,
+                driver_mode: document.getElementById('driver_mode').value,
+                read_only: document.getElementById('read-only').checked
             };
             localStorage.setItem('v_drive_config', JSON.stringify(config));
             
@@ -541,6 +559,7 @@
                     <div class="disk-info">FUSE挂载: ${disk.config.mount_path}</div>
                     <div class="disk-info">并发同步: ${disk.config.concurrency || 5} 线程</div>
                     <div class="disk-info">系统挂载: ${disk.final_mountpoint} (${disk.loop_status === 'mounted' ? '已挂载' : '未挂载'})</div>
+                    <div class="disk-info">压缩算法: <span class="text-slate-700 font-bold">${(disk.config.compression || 'none') === 'none' ? '不压缩' : disk.config.compression.toUpperCase()}</span></div>
                     <div class="disk-info">本地缓存: ${cacheMB} MB / ${disk.config.max_cache_gb} GB</div>
                     <div class="disk-info">正在下载: ${disk.download_queue_size || 0} 块</div>
                     <div class="disk-info">待上传: ${disk.upload_queue_size} 块</div>
@@ -600,6 +619,7 @@
                          document.getElementById('edit_download_limit_kb').value = disk.config.download_limit_kb || 0;
                           document.getElementById('edit_concurrency').value = disk.config.concurrency || 5;
                           document.getElementById('edit_inode_ratio').value = disk.config.inode_ratio || 4194304;
+                          document.getElementById('edit_compression').value = disk.config.compression || "none";
                           document.getElementById('edit_driver_mode').value = disk.config.driver_mode || "fuse";
                           document.getElementById('edit_read_only').checked = disk.config.read_only || false;
                           
@@ -638,6 +658,7 @@
                   download_limit_kb: parseInt(document.getElementById('edit_download_limit_kb').value || 0),
                   concurrency: parseInt(document.getElementById('edit_concurrency').value),
                   inode_ratio: parseInt(document.getElementById('edit_inode_ratio').value),
+                  compression: document.getElementById('edit_compression').value,
                   driver_mode: document.getElementById('edit_driver_mode').value,
                   read_only: document.getElementById('edit_read_only').checked
               };
@@ -658,9 +679,9 @@
          }
 
          function resetSettingsForm() {
-             // 重置表单并解锁字段
-             const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb', 'inode_ratio', 'driver_mode'];
-             lockedFields.forEach(id => {
+            // 重置表单并解锁字段
+            const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb', 'inode_ratio', 'compression', 'driver_mode'];
+            lockedFields.forEach(id => {
                  const el = document.getElementById(id);
                  if (el) {
                      el.disabled = false;

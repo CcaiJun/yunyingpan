@@ -5,6 +5,8 @@ import time
 import logging
 import threading
 import collections
+import zstandard as zstd
+import lz4.frame
 from webdav4.client import Client as WebDAVClient
 from httpx import Timeout, Limits
 
@@ -116,7 +118,7 @@ class MetadataDB:
 class BlockManager:
     def __init__(self, dav_url, dav_user, dav_password, cache_dir, disk_size_gb, max_cache_size_gb, 
                  block_size_mb=4, img_name="virtual_disk.img", remote_path="blocks", concurrency=4,
-                 upload_limit_kb=0, download_limit_kb=0):
+                 compression="none", upload_limit_kb=0, download_limit_kb=0):
         self.use_remote = bool(dav_url and dav_url.strip())
         if self.use_remote:
             limits = Limits(max_connections=concurrency * 2, max_keepalive_connections=concurrency)
@@ -136,6 +138,12 @@ class BlockManager:
         self.img_name = img_name if img_name.endswith('.img') else f"{img_name}.img"
         self.remote_path = remote_path.strip('/')
         self.concurrency = concurrency
+        self.compression = compression
+        
+        # 压缩器初始化
+        if self.compression == "zstd":
+            self.cctx = zstd.ZstdCompressor(level=3)
+            self.dctx = zstd.ZstdDecompressor()
         
         # 速率限制器
         self.upload_limiter = RateLimiter(upload_limit_kb)
@@ -276,10 +284,25 @@ class BlockManager:
                                         if diff > 0:
                                             self.upload_limiter.request(diff)
                                             self.total_uploaded_bytes += diff
-                                            # logger.debug(f"Uploaded {diff} bytes, total {self.total_uploaded_bytes}")
                                         last_transferred = transferred
+                                    
+                                    # 处理压缩逻辑
+                                    if self.compression == "none":
+                                        self.client.upload_file(block_path, remote_file_path, overwrite=True, callback=upload_callback)
+                                    else:
+                                        with open(block_path, 'rb') as f:
+                                            raw_data = f.read()
                                         
-                                    self.client.upload_file(block_path, remote_file_path, overwrite=True, callback=upload_callback)
+                                        if self.compression == "zstd":
+                                            processed_data = self.cctx.compress(raw_data)
+                                        elif self.compression == "lz4":
+                                            processed_data = lz4.frame.compress(raw_data)
+                                        
+                                        # 上传内存中的压缩数据
+                                        import io
+                                        data_stream = io.BytesIO(processed_data)
+                                        self.client.upload_fileobj(data_stream, remote_file_path, overwrite=True, callback=upload_callback)
+                                    
                                     self.db.set_block_status(block_id, 'cached', remote_exists=1)
                                     break
                                 except Exception as e:
@@ -344,9 +367,26 @@ class BlockManager:
                                 self.download_limiter.request(diff)
                                 self.total_downloaded_bytes += diff
                             last_transferred = transferred
+                        
+                        if self.compression == "none":
+                            self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path, callback=download_callback)
+                        else:
+                            import io
+                            data_stream = io.BytesIO()
+                            self.client.download_fileobj(f"{self.remote_path}/blk_{block_id:08d}.dat", data_stream, callback=download_callback)
+                            compressed_data = data_stream.getvalue()
                             
-                        self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path, callback=download_callback)
-                        self.db.set_block_status(block_id, 'cached', remote_exists=1)
+                            if self.compression == "zstd":
+                                raw_data = self.dctx.decompress(compressed_data)
+                            elif self.compression == "lz4":
+                                raw_data = lz4.frame.decompress(compressed_data)
+                            else:
+                                raw_data = compressed_data
+                            
+                            with open(block_path, 'wb') as f:
+                                f.write(raw_data)
+
+                                self.db.set_block_status(block_id, 'cached', remote_exists=1)
                     except Exception as e:
                         logger.error(f"Download block {block_id} failed: {e}")
                         result[bytes_read:bytes_read+chunk_len] = b'\x00' * chunk_len
@@ -397,9 +437,26 @@ class BlockManager:
                                 self.download_limiter.request(diff)
                                 self.total_downloaded_bytes += diff
                             last_transferred = transferred
+                        
+                        if self.compression == "none":
+                            self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path, callback=download_callback)
+                        else:
+                            import io
+                            data_stream = io.BytesIO()
+                            self.client.download_fileobj(f"{self.remote_path}/blk_{block_id:08d}.dat", data_stream, callback=download_callback)
+                            compressed_data = data_stream.getvalue()
                             
-                        self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path, callback=download_callback)
-                        self.db.set_block_status(block_id, 'cached', remote_exists=1)
+                            if self.compression == "zstd":
+                                raw_data = self.dctx.decompress(compressed_data)
+                            elif self.compression == "lz4":
+                                raw_data = lz4.frame.decompress(compressed_data)
+                            else:
+                                raw_data = compressed_data
+                            
+                            with open(block_path, 'wb') as f:
+                                f.write(raw_data)
+
+                                self.db.set_block_status(block_id, 'cached', remote_exists=1)
                     except:
                         pass
                     finally:

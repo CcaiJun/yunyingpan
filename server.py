@@ -42,6 +42,7 @@ class MountConfig(BaseModel):
     remote_path: str = "blocks"
     concurrency: int = 5
     inode_ratio: int = 4194304  # 默认 4MB (对应 largefile4)
+    compression: str = "none"   # none, zstd, lz4
     driver_mode: str = "fuse" # fuse or nbd
     upload_limit_kb: int = 0
     download_limit_kb: int = 0
@@ -111,6 +112,7 @@ def do_mount(inst: DiskInstance):
                 cache_dir=cfg.cache_dir, disk_size_gb=cfg.disk_size_gb,
                 max_cache_size_gb=cfg.max_cache_gb, block_size_mb=cfg.block_size_mb,
                 img_name=cfg.disk_name, remote_path=cfg.remote_path, concurrency=cfg.concurrency,
+                compression=cfg.compression,
                 upload_limit_kb=cfg.upload_limit_kb, download_limit_kb=cfg.download_limit_kb
             )
 
@@ -153,6 +155,7 @@ def do_mount(inst: DiskInstance):
                 cache_dir=cfg.cache_dir, disk_size_gb=cfg.disk_size_gb,
                 max_cache_size_gb=cfg.max_cache_gb, block_size_mb=cfg.block_size_mb,
                 img_name=cfg.disk_name, remote_path=cfg.remote_path, concurrency=cfg.concurrency,
+                compression=cfg.compression,
                 upload_limit_kb=cfg.upload_limit_kb, download_limit_kb=cfg.download_limit_kb
             )
             inst.vdrive = bm # 兼容状态检查中的上传队列统计
@@ -455,6 +458,7 @@ async def mount_drive(config: MountConfig):
         if old.block_size_mb != config.block_size_mb: locked_changes.append("分块大小")
         if old.disk_size_gb != config.disk_size_gb: locked_changes.append("磁盘容量")
         if old.inode_ratio != config.inode_ratio: locked_changes.append("Inode 比例")
+        if old.compression != config.compression: locked_changes.append("压缩算法")
         
         if locked_changes:
             raise HTTPException(status_code=400, detail=f"禁止修改关键属性: {', '.join(locked_changes)}。修改这些属性会导致现有数据损坏。")
