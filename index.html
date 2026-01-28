@@ -151,6 +151,13 @@
                             </select>
                         </div>
                         <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">驱动模式 (Driver Mode)</label>
+                            <select id="driver_mode" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                <option value="fuse" selected>FUSE (兼容性好)</option>
+                                <option value="nbd">NBD (高性能/推荐)</option>
+                            </select>
+                        </div>
+                        <div>
                             <label class="block text-sm font-medium text-slate-700 mb-2">并发同步线程数</label>
                             <input type="number" id="concurrency" value="5" min="1" max="20" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                         </div>
@@ -274,7 +281,8 @@
                 disk_size_gb: parseInt(document.getElementById('disk_size_gb').value),
                 max_cache_gb: parseInt(document.getElementById('max_cache_gb').value),
                 concurrency: parseInt(document.getElementById('concurrency').value),
-                inode_ratio: parseInt(document.getElementById('inode_ratio').value)
+                inode_ratio: parseInt(document.getElementById('inode_ratio').value),
+                driver_mode: document.getElementById('driver_mode').value
             };
             localStorage.setItem('v_drive_config', JSON.stringify(config));
             
@@ -442,9 +450,10 @@
                          document.getElementById('max_cache_gb').value = disk.config.max_cache_gb;
                          document.getElementById('concurrency').value = disk.config.concurrency || 5;
                          document.getElementById('inode_ratio').value = disk.config.inode_ratio || 4194304;
+                         document.getElementById('driver_mode').value = disk.config.driver_mode || "fuse";
                          
                          // 锁定不可更改的属性
-                         const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb', 'inode_ratio'];
+                        const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb', 'inode_ratio', 'driver_mode'];
                          lockedFields.forEach(id => {
                              const el = document.getElementById(id);
                              if (el) {
@@ -465,7 +474,7 @@
 
          function resetSettingsForm() {
              // 重置表单并解锁字段
-             const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb', 'inode_ratio'];
+             const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb', 'inode_ratio', 'driver_mode'];
              lockedFields.forEach(id => {
                  const el = document.getElementById(id);
                  if (el) {

@@ -42,11 +42,13 @@ class MountConfig(BaseModel):
     remote_path: str = "blocks"
     concurrency: int = 5
     inode_ratio: int = 4194304  # 默认 4MB (对应 largefile4)
+    driver_mode: str = "fuse" # fuse or nbd
 
 class DiskInstance:
     def __init__(self, config: MountConfig):
         self.config = config
         self.vdrive = None
+        self.nbd_server = None
         self.thread = None
         self.status = "stopped" # stopped, starting, running, error
         self.error_msg = ""
@@ -54,6 +56,7 @@ class DiskInstance:
         self.cache_usage_bytes = 0
         self.loop_status = "unmounted"
         self.upload_queue_size = 0
+        self.nbd_device = ""
 
 def load_configs() -> List[dict]:
     if os.path.exists(CONFIG_FILE):
@@ -77,120 +80,152 @@ def do_mount(inst: DiskInstance):
     
     try:
         cfg = inst.config
-        # 0. 预清理：如果挂载路径已存在且是挂载点，尝试先卸载
         import subprocess
+        import time
         logger.info(f"Pre-cleaning mount paths for {cfg.disk_name}")
+        
+        # 0. 预清理
         try:
-            # 卸载 loop 挂载点
             subprocess.run(['umount', '-l', inst.final_mountpoint], check=False, capture_output=True)
-            # 卸载 FUSE 挂载点
-            subprocess.run(['fusermount3', '-u', cfg.mount_path], check=False, capture_output=True)
+            if cfg.driver_mode == "fuse":
+                subprocess.run(['fusermount3', '-u', cfg.mount_path], check=False, capture_output=True)
+            else:
+                if inst.nbd_device:
+                    subprocess.run(['nbd-client', '-d', inst.nbd_device], check=False, capture_output=True)
             subprocess.run(['umount', '-l', cfg.mount_path], check=False, capture_output=True)
-            # 确保目录存在
             os.makedirs(cfg.mount_path, exist_ok=True)
             os.makedirs(inst.final_mountpoint, exist_ok=True)
         except Exception as e:
-            logger.warning(f"Cleanup failed (non-critical): {e}")
+            logger.warning(f"Cleanup failed: {e}")
 
-        # 1. 启动 FUSE 层
-        logger.info(f"Starting FUSE layer for {cfg.disk_name} at {cfg.mount_path}")
-        inst.vdrive = VDrive(
-            dav_url=cfg.dav_url, 
-            dav_user=cfg.dav_user, 
-            dav_password=cfg.dav_password, 
-            cache_dir=cfg.cache_dir, 
-            disk_size_gb=cfg.disk_size_gb,
-            max_cache_size_gb=cfg.max_cache_gb,
-            block_size_mb=cfg.block_size_mb,
-            img_name=cfg.disk_name,
-            remote_path=cfg.remote_path,
-            concurrency=cfg.concurrency
-        )
+        if cfg.driver_mode == "fuse":
+            # --- FUSE 模式 ---
+            from v_drive import VDrive, FUSE
+            inst.vdrive = VDrive(
+                dav_url=cfg.dav_url, dav_user=cfg.dav_user, dav_password=cfg.dav_password, 
+                cache_dir=cfg.cache_dir, disk_size_gb=cfg.disk_size_gb,
+                max_cache_size_gb=cfg.max_cache_gb, block_size_mb=cfg.block_size_mb,
+                img_name=cfg.disk_name, remote_path=cfg.remote_path, concurrency=cfg.concurrency
+            )
 
-        def start_fuse():
-            try:
-                FUSE(inst.vdrive, cfg.mount_path, foreground=True, nonempty=True, allow_other=True, direct_io=True)
-            except Exception as fuse_err:
-                logger.error(f"FUSE process exited with error: {fuse_err}")
-            finally:
-                logger.info(f"FUSE process for {cfg.disk_name} stopped")
-                # 如果不是人为停止的，标记为错误
-                if inst.status != "stopped":
-                    inst.status = "error"
-                    inst.error_msg = "FUSE 进程异常退出"
+            def start_fuse():
+                try:
+                    FUSE(inst.vdrive, cfg.mount_path, foreground=True, nonempty=True, allow_other=True, direct_io=True)
+                except Exception as fuse_err:
+                    logger.error(f"FUSE error: {fuse_err}")
+                finally:
+                    if inst.status != "stopped":
+                        inst.status = "error"
+                        inst.error_msg = "FUSE 进程异常退出"
 
-        inst.thread = threading.Thread(target=start_fuse, daemon=True)
-        inst.thread.start()
+            inst.thread = threading.Thread(target=start_fuse, daemon=True)
+            inst.thread.start()
 
-        # 2. 等待镜像并挂载 Loop
-        img_name = cfg.disk_name if cfg.disk_name.endswith('.img') else f"{cfg.disk_name}.img"
-        img_path = os.path.join(cfg.mount_path, img_name)
-        logger.info(f"Waiting for image file: {img_path}")
-
-        import time
-        max_wait = 300 # 增加等待时间，大容量硬盘初始化较慢
-        while max_wait > 0:
-            if not inst.thread.is_alive():
-                logger.error(f"FUSE process died while waiting for {img_path}")
-                raise Exception("FUSE 进程异常退出，请检查日志")
+            img_name = cfg.disk_name if cfg.disk_name.endswith('.img') else f"{cfg.disk_name}.img"
+            target_path = os.path.join(cfg.mount_path, img_name)
             
-            if os.path.exists(img_path):
-                break
-                
-            time.sleep(1)
-            max_wait -= 1
+            # 等待 FUSE 镜像文件出现
+            max_wait = 60
+            while max_wait > 0 and not os.path.exists(target_path):
+                if not inst.thread.is_alive(): raise Exception("FUSE 进程启动失败")
+                time.sleep(1)
+                max_wait -= 1
+            if not os.path.exists(target_path): raise Exception("FUSE 镜像生成超时")
+            
+            mount_cmd = ['mount', '-o', 'loop', target_path, inst.final_mountpoint]
 
-        if not os.path.exists(img_path):
-            logger.error(f"Image file {img_path} not found after 300s")
-            raise Exception("FUSE镜像未能按时生成")
+        else:
+            # --- NBD 模式 ---
+            from nbd_server import NBDServer
+            from block_manager import BlockManager
+            
+            # 分配端口 (避开 10809)
+            port = 10810 + list(disks.keys()).index(cfg.disk_name)
+            
+            bm = BlockManager(
+                dav_url=cfg.dav_url, dav_user=cfg.dav_user, dav_password=cfg.dav_password, 
+                cache_dir=cfg.cache_dir, disk_size_gb=cfg.disk_size_gb,
+                max_cache_size_gb=cfg.max_cache_gb, block_size_mb=cfg.block_size_mb,
+                img_name=cfg.disk_name, remote_path=cfg.remote_path, concurrency=cfg.concurrency
+            )
+            inst.vdrive = bm # 兼容状态检查中的上传队列统计
+            
+            inst.nbd_server = NBDServer(bm, host='127.0.0.1', port=port)
+            
+            def start_nbd():
+                try:
+                    inst.nbd_server.start()
+                except Exception as e:
+                    logger.error(f"NBD server error: {e}")
+                finally:
+                    if inst.status != "stopped":
+                        inst.status = "error"
+                        inst.error_msg = "NBD 服务端异常退出"
 
-        logger.info(f"Image file found, preparing loop mount at {inst.final_mountpoint}")
-        os.makedirs(inst.final_mountpoint, exist_ok=True)
-        
-        # 检查格式化
+            inst.thread = threading.Thread(target=start_nbd, daemon=True)
+            inst.thread.start()
+            
+            # 寻找空闲 NBD 设备
+            nbd_dev = None
+            for i in range(16):
+                dev = f"/dev/nbd{i}"
+                if subprocess.run(['nbd-client', '-check', dev], capture_output=True).returncode != 0:
+                    nbd_dev = dev
+                    break
+            if not nbd_dev: raise Exception("没有可用的 NBD 设备")
+            
+            inst.nbd_device = nbd_dev
+            time.sleep(1) # 等待 server 启动
+            
+            # 连接 NBD 客户端 (指定 export name 以兼容部分客户端，-g 尝试禁用 NBD_OPT_GO)
+            subprocess.run(['nbd-client', '127.0.0.1', str(port), nbd_dev, '-N', 'default', '-g'], check=True)
+            target_path = nbd_dev
+            mount_cmd = ['mount', nbd_dev, inst.final_mountpoint]
+
+        # 检查并格式化
         needs_format = True
         try:
-            # 使用 blkid 检查是否有文件系统
-            res = subprocess.run(['blkid', img_path], capture_output=True, text=True)
-            if "TYPE=" in res.stdout:
-                needs_format = False
-                logger.info(f"Disk {cfg.disk_name} already formatted, skipping mkfs.")
-        except Exception as e: 
-            logger.error(f"Error during format check: {e}")
+            res = subprocess.run(['blkid', target_path], capture_output=True, text=True)
+            if "TYPE=" in res.stdout: needs_format = False
+        except: pass
 
         if needs_format:
-            logger.info(f"Formatting disk {cfg.disk_name} with Inode ratio {cfg.inode_ratio}...")
-            # 增加 -O ^metadata_csum 以提高与某些内核的兼容性，并减少元数据开销
-            try:
-                # 使用用户指定的 inode_ratio (-i)
-                subprocess.run(['mkfs.ext4', '-F', '-i', str(cfg.inode_ratio), '-b', '4096', 
-                              '-O', '^metadata_csum',
-                              '-E', 'lazy_itable_init=1,lazy_journal_init=1', img_path], check=True)
-            except subprocess.CalledProcessError as e:
-                logger.warning(f"Standard mkfs failed, trying fallback options for {cfg.disk_name}...")
-                # 备用方案：去掉复杂的优化参数，使用最基础的格式化
-                subprocess.run(['mkfs.ext4', '-F', img_path], check=True)
+            logger.info(f"Formatting {target_path}...")
+            subprocess.run(['mkfs.ext4', '-F', '-i', str(cfg.inode_ratio), '-b', '4096', 
+                          '-O', '^metadata_csum', '-E', 'lazy_itable_init=1,lazy_journal_init=1', target_path], check=True)
 
-        logger.info(f"Final loop mount: {img_path} -> {inst.final_mountpoint}")
-        try:
-            subprocess.run(['mount', '-o', 'loop', img_path, inst.final_mountpoint], check=True)
-        except subprocess.CalledProcessError as e:
-            if "Structure needs cleaning" in str(e) or e.returncode == 32:
-                logger.warning(f"Disk {cfg.disk_name} filesystem corrupted, attempting repair...")
-                subprocess.run(['e2fsck', '-y', img_path], check=False)
-                # 再次尝试挂载
-                subprocess.run(['mount', '-o', 'loop', img_path, inst.final_mountpoint], check=True)
-            else:
-                raise e
+        # 最终挂载
+        logger.info(f"Final mount: {' '.join(mount_cmd)}")
+        subprocess.run(mount_cmd, check=True)
         
         inst.status = "running"
-        inst.error_msg = ""
-        logger.info(f"Disk {cfg.disk_name} mounted successfully at {inst.final_mountpoint}")
+        logger.info(f"Disk {cfg.disk_name} started in {cfg.driver_mode} mode")
 
     except Exception as e:
         inst.status = "error"
         inst.error_msg = str(e)
-        logger.error(f"Mount disk {inst.config.disk_name} failed: {e}")
+        logger.error(f"Mount failed: {e}")
+
+def unmount_disk(inst: DiskInstance):
+    inst.status = "stopped"
+    import subprocess
+    try:
+        # 1. 卸载最终挂载点
+        subprocess.run(['umount', '-l', inst.final_mountpoint], check=False)
+        
+        if inst.config.driver_mode == "fuse":
+            # 2. 卸载 FUSE
+            subprocess.run(['fusermount3', '-u', inst.config.mount_path], check=False)
+        else:
+            # 2. 断开 NBD
+            if inst.nbd_device:
+                subprocess.run(['nbd-client', '-d', inst.nbd_device], check=False)
+            if inst.nbd_server:
+                inst.nbd_server.stop()
+        
+        subprocess.run(['umount', '-l', inst.config.mount_path], check=False)
+    except Exception as e:
+        logger.error(f"Unmount error: {e}")
 
 # 全局管理
 disks: Dict[str, DiskInstance] = {}
@@ -285,18 +320,29 @@ async def startup_event():
                         except:
                             is_fuse_connected = False
                     
-                    if is_loop_mounted and is_fuse_connected:
-                        instance.loop_status = "mounted"
-                        instance.status = "running"
-                        instance.error_msg = ""
-                    elif is_loop_mounted:
-                        instance.loop_status = "mounted"
-                        instance.status = "error"
-                        instance.error_msg = "FUSE 层连接断开 (Transport endpoint not connected)"
+                    if instance.config.driver_mode == "fuse":
+                        if is_loop_mounted and is_fuse_connected:
+                            instance.loop_status = "mounted"
+                            instance.status = "running"
+                            instance.error_msg = ""
+                        elif is_loop_mounted:
+                            instance.loop_status = "mounted"
+                            instance.status = "error"
+                            instance.error_msg = "FUSE 层连接断开 (Transport endpoint not connected)"
+                        else:
+                            instance.loop_status = "unmounted"
+                            if instance.status == "running":
+                                instance.status = "stopped"
                     else:
-                        instance.loop_status = "unmounted"
-                        if instance.status == "running":
-                            instance.status = "stopped"
+                        # NBD 模式
+                        if is_loop_mounted:
+                            instance.loop_status = "mounted"
+                            instance.status = "running"
+                            instance.error_msg = ""
+                        else:
+                            instance.loop_status = "unmounted"
+                            if instance.status == "running":
+                                instance.status = "stopped"
                     
                     # 4. 更新上传队列大小
                     if instance.vdrive:
@@ -391,11 +437,11 @@ async def mount_drive(config: MountConfig):
     updated = False
     for i, cfg in enumerate(configs):
         if cfg.get('disk_name') == config.disk_name:
-            configs[i] = config.dict()
+            configs[i] = config.model_dump()
             updated = True
             break
     if not updated:
-        configs.append(config.dict())
+        configs.append(config.model_dump())
     save_configs(configs)
 
     if instance.status == "running":
