@@ -67,9 +67,13 @@ class VDrive(Operations):
         return 0
 
     def flush(self, path, fh):
+        if path == '/' + self.img_name:
+            self.bm.sync()
         return 0
 
     def fsync(self, path, datasync, fh):
+        if path == '/' + self.img_name:
+            self.bm.sync()
         return 0
 
 

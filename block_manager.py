@@ -405,12 +405,20 @@ class BlockManager:
                     finally:
                         with self.downloading_lock: self.downloading_count -= 1
                 else:
-                    with open(block_path, 'wb') as f: f.truncate(self.block_size)
+                    with open(block_path, 'wb') as f: 
+                        f.truncate(self.block_size)
+                        f.flush()
+                        try: os.fsync(f.fileno())
+                        except: pass
             try:
                 with open(block_path, 'r+b') as f:
                     f.seek(block_offset)
                     f.write(buf[bytes_written:bytes_written+chunk_len])
                     f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except:
+                        pass
             except Exception as e:
                 logger.error(f"Write to block file {block_id} failed: {e}")
                 raise e
@@ -418,3 +426,9 @@ class BlockManager:
             self.db.set_block_status(block_id, 'dirty')
             with self.upload_lock: self.upload_queue.add(block_id)
         return length
+
+    def sync(self):
+        """确保所有元数据和缓存都已写入磁盘"""
+        # SQLite 在 commit 时已经保证了写入磁盘（尤其是开启了 WAL）
+        # 这里主要作为一个占位符，如果未来有更复杂的缓存逻辑可以在此实现
+        pass

@@ -138,6 +138,7 @@ class NBDServer:
                 elif type == NBD_CMD_DISC:
                     break
                 elif type == NBD_CMD_FLUSH:
+                    self.bm.sync()
                     conn.sendall(struct.pack(">IIQ", 0x67446698, 0, handle))
                 else:
                     # Unsupported command, send error
