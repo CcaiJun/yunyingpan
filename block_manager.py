@@ -115,6 +115,11 @@ class MetadataDB:
             cursor = conn.execute('SELECT block_id FROM blocks WHERE status = "dirty"')
             return [row[0] for row in cursor.fetchall()]
 
+    def get_remote_exists_count(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('SELECT COUNT(*) FROM blocks WHERE remote_exists = 1')
+            return cursor.fetchone()[0]
+
 class BlockManager:
     def __init__(self, dav_url, dav_user, dav_password, cache_dir, disk_size_gb, max_cache_size_gb, 
                  block_size_mb=4, img_name="virtual_disk.img", remote_path="blocks", concurrency=4,

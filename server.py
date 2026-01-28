@@ -8,6 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from v_drive import VDrive, FUSE
 import psutil
+import sqlite3
+import time
+import subprocess
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -63,6 +66,8 @@ class DiskInstance:
         self.upload_speed = 0
         self.download_speed = 0
         self.nbd_device = ""
+        self.total_blocks = 0
+        self.uploaded_blocks = 0
 
 def load_configs() -> List[dict]:
     if os.path.exists(CONFIG_FILE):
@@ -298,32 +303,57 @@ async def startup_event():
                 check_cache = (now - last_cache_check) > 30 # 每30秒检查一次缓存大小，而不是每5秒
                 
                 for name, instance in disks.items():
-                    # 4. 更新上传队列大小
-                    bm = None
-                    if instance.config.driver_mode == "fuse":
-                        if instance.vdrive:
-                            bm = instance.vdrive.bm
-                    else:
-                        bm = instance.vdrive # NBD 模式下 instance.vdrive 直接是 BlockManager
-                    
-                    if bm:
-                        with bm.upload_lock:
-                            queue_size = len(bm.upload_queue)
-                        with bm.uploading_lock:
-                            uploading_size = bm.uploading_count
-                        with bm.downloading_lock:
-                            downloading_size = bm.downloading_count
-                        instance.upload_queue_size = queue_size + uploading_size
-                        instance.download_queue_size = downloading_size
-                        instance.upload_speed = bm.upload_speed
-                        instance.download_speed = bm.download_speed
-                        if instance.upload_speed > 0 or instance.download_speed > 0:
-                            logger.info(f"Disk {name} speed: UP={instance.upload_speed}, DOWN={instance.download_speed}")
-                    else:
-                        instance.upload_queue_size = 0
-                        instance.download_queue_size = 0
-                        instance.upload_speed = 0
-                        instance.download_speed = 0
+                    # 4. 更新上传进度和状态
+                    try:
+                        bm = None
+                        if instance.config.driver_mode == "fuse":
+                            if instance.vdrive:
+                                bm = instance.vdrive.bm
+                        else:
+                            bm = instance.vdrive
+                        
+                        # 无论是否运行，先尝试基于配置计算总块数
+                        instance.total_blocks = int((instance.config.disk_size_gb * 1024 * 1024 * 1024) // (instance.config.block_size_mb * 1024 * 1024))
+                        
+                        if bm:
+                            with bm.upload_lock:
+                                queue_size = len(bm.upload_queue)
+                            with bm.uploading_lock:
+                                uploading_size = bm.uploading_count
+                            with bm.downloading_lock:
+                                downloading_size = bm.downloading_count
+                            instance.upload_queue_size = queue_size + uploading_size
+                            instance.download_queue_size = downloading_size
+                            instance.upload_speed = bm.upload_speed
+                            instance.download_speed = bm.download_speed
+                            instance.uploaded_blocks = int(bm.db.get_remote_exists_count())
+                            
+                            if instance.upload_speed > 0 or instance.download_speed > 0:
+                                logger.info(f"Disk {name} stats: UP={instance.upload_speed:.2f}, DOWN={instance.download_speed:.2f}, Blocks={instance.uploaded_blocks}/{instance.total_blocks}")
+                        else:
+                            # 如果 bm 不存在，尝试直接读取数据库文件获取进度
+                            try:
+                                img_name = instance.config.disk_name
+                                if not img_name.endswith('.img'):
+                                    img_name = f"{img_name}.img"
+                                
+                                db_path = os.path.join(instance.config.cache_dir, f'.{img_name}_metadata.db')
+                                if os.path.exists(db_path):
+                                    # 使用 sqlite3 直接读取，注意超时设置防止锁竞争
+                                    with sqlite3.connect(db_path, timeout=1) as conn:
+                                        cursor = conn.execute('SELECT COUNT(*) FROM blocks WHERE remote_exists = 1')
+                                        instance.uploaded_blocks = int(cursor.fetchone()[0])
+                                else:
+                                    instance.uploaded_blocks = 0
+                            except Exception:
+                                instance.uploaded_blocks = 0
+                                
+                            instance.upload_queue_size = 0
+                            instance.download_queue_size = 0
+                            instance.upload_speed = 0
+                            instance.download_speed = 0
+                    except Exception as e:
+                        logger.error(f"Error updating stats for {name}: {e}")
 
                     # 2. 计算缓存大小 (优化：降低频率)
                     if check_cache:
@@ -451,6 +481,8 @@ def list_disks():
             "download_queue_size": instance.download_queue_size,
             "upload_speed": instance.upload_speed,
             "download_speed": instance.download_speed,
+            "total_blocks": instance.total_blocks,
+            "uploaded_blocks": instance.uploaded_blocks,
             "error_msg": instance.error_msg,
             "final_mountpoint": instance.final_mountpoint
         })

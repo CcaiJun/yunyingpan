@@ -556,12 +556,14 @@
 
                     <div class="disk-info">驱动模式: ${disk.config.driver_mode === 'nbd' ? '<span class="text-blue-600 font-bold">NBD</span> (高性能)' : '<span class="text-amber-600 font-bold">FUSE</span> (兼容性)'}</div>
                     <div class="disk-info">容量: ${disk.config.disk_size_gb} GB</div>
+                    <div class="disk-info">云端分块大小: <span class="text-slate-700 font-bold">${disk.config.block_size_mb} MB</span></div>
                     <div class="disk-info">FUSE挂载: ${disk.config.mount_path}</div>
                     <div class="disk-info">并发同步: ${disk.config.concurrency || 5} 线程</div>
                     <div class="disk-info">系统挂载: ${disk.final_mountpoint} (${disk.loop_status === 'mounted' ? '已挂载' : '未挂载'})</div>
                     <div class="disk-info">Inode 比例: <span class="text-slate-700 font-bold">${(disk.config.inode_ratio || 4194304) >= 1048576 ? (disk.config.inode_ratio / 1024 / 1024) + ' MB' : (disk.config.inode_ratio / 1024) + ' KB'}</span></div>
                     <div class="disk-info">压缩算法: <span class="text-slate-700 font-bold">${(disk.config.compression || 'none') === 'none' ? '不压缩' : disk.config.compression.toUpperCase()}</span></div>
                     <div class="disk-info">本地缓存: ${cacheMB} MB / ${disk.config.max_cache_gb} GB</div>
+                    <div class="disk-info">分块进度: <span class="text-slate-700 font-bold">${disk.uploaded_blocks || 0}</span> / ${disk.total_blocks || 0} 块</div>
                     <div class="disk-info">正在下载: ${disk.download_queue_size || 0} 块</div>
                     <div class="disk-info">待上传: ${disk.upload_queue_size} 块</div>
                     
