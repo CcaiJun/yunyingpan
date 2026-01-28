@@ -56,6 +56,9 @@ class DiskInstance:
         self.cache_usage_bytes = 0
         self.loop_status = "unmounted"
         self.upload_queue_size = 0
+        self.download_queue_size = 0
+        self.upload_speed = 0
+        self.download_speed = 0
         self.nbd_device = ""
 
 def load_configs() -> List[dict]:
@@ -290,9 +293,19 @@ async def startup_event():
                             queue_size = len(bm.upload_queue)
                         with bm.uploading_lock:
                             uploading_size = bm.uploading_count
+                        with bm.downloading_lock:
+                            downloading_size = bm.downloading_count
                         instance.upload_queue_size = queue_size + uploading_size
+                        instance.download_queue_size = downloading_size
+                        instance.upload_speed = bm.upload_speed
+                        instance.download_speed = bm.download_speed
+                        if instance.upload_speed > 0 or instance.download_speed > 0:
+                            logger.info(f"Disk {name} speed: UP={instance.upload_speed}, DOWN={instance.download_speed}")
                     else:
                         instance.upload_queue_size = 0
+                        instance.download_queue_size = 0
+                        instance.upload_speed = 0
+                        instance.download_speed = 0
 
                     # 2. 计算缓存大小 (优化：降低频率)
                     if check_cache:
@@ -366,7 +379,7 @@ async def startup_event():
             except Exception as e:
                 logger.error(f"Status updater error: {e}")
             
-            time.sleep(5)
+            time.sleep(2)
 
     threading.Thread(target=status_updater, daemon=True).start()
 
@@ -405,6 +418,9 @@ def list_disks():
             "config": instance.config,
             "cache_usage_bytes": instance.cache_usage_bytes,
             "upload_queue_size": instance.upload_queue_size,
+            "download_queue_size": instance.download_queue_size,
+            "upload_speed": instance.upload_speed,
+            "download_speed": instance.download_speed,
             "error_msg": instance.error_msg,
             "final_mountpoint": instance.final_mountpoint
         })

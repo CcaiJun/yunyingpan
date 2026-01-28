@@ -484,16 +484,40 @@
                 const statusClass = `status-${disk.status}`;
                 const cacheMB = (disk.cache_usage_bytes / 1024 / 1024).toFixed(1);
                 
+                // 格式化速度
+                const formatSpeed = (bytesPerSec) => {
+          if (bytesPerSec <= 0) return '0 B/s';
+          const k = 1024;
+          const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+          let i = Math.floor(Math.log(bytesPerSec) / Math.log(k));
+          if (i < 0) i = 0;
+          if (i >= sizes.length) i = sizes.length - 1;
+          return parseFloat((bytesPerSec / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        };
+
                 card.innerHTML = `
                     <div class="disk-header">
                         <span class="disk-title"><i class="fas fa-hdd mr-2"></i>${disk.disk_name}</span>
                         <span class="status-badge ${statusClass}">${disk.status === 'running' ? '运行中' : (disk.status === 'stopped' ? '已停止' : (disk.status === 'starting' ? '启动中...' : '状态异常'))}</span>
                     </div>
+                    
+                    <div class="grid grid-cols-2 gap-2 mb-4 p-3 bg-slate-50 rounded-lg">
+                        <div class="text-center border-r border-slate-200">
+                            <div class="text-[10px] text-slate-500 uppercase font-bold">下载速度</div>
+                            <div class="text-sm font-mono text-blue-600">${formatSpeed(disk.download_speed || 0)}</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="text-[10px] text-slate-500 uppercase font-bold">上传速度</div>
+                            <div class="text-sm font-mono text-green-600">${formatSpeed(disk.upload_speed || 0)}</div>
+                        </div>
+                    </div>
+
                     <div class="disk-info">容量: ${disk.config.disk_size_gb} GB</div>
                     <div class="disk-info">FUSE挂载: ${disk.config.mount_path}</div>
                     <div class="disk-info">并发同步: ${disk.config.concurrency || 5} 线程</div>
                     <div class="disk-info">系统挂载: ${disk.final_mountpoint} (${disk.loop_status === 'mounted' ? '已挂载' : '未挂载'})</div>
                     <div class="disk-info">本地缓存: ${cacheMB} MB / ${disk.config.max_cache_gb} GB</div>
+                    <div class="disk-info">正在下载: ${disk.download_queue_size || 0} 块</div>
                     <div class="disk-info">待上传: ${disk.upload_queue_size} 块</div>
                     
                     ${disk.error_msg ? `<div class="p-2 mt-2 bg-red-50 text-red-600 text-xs rounded border border-red-100">${disk.error_msg}</div>` : ''}
@@ -675,7 +699,7 @@
         }
 
         // 轮询更新状态
-        setInterval(fetchDisks, 15000);
+        setInterval(fetchDisks, 2000);
         fetchDisks();
         loadConfig();
     </script>

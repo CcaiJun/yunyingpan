@@ -96,9 +96,20 @@ class BlockManager:
         self.db = MetadataDB(os.path.join(self.cache_dir, f'.{self.img_name}_metadata.db'))
         self.upload_queue = set()
         self.uploading_count = 0
+        self.downloading_count = 0
         self.uploading_lock = threading.Lock()
+        self.downloading_lock = threading.Lock()
         self.upload_lock = threading.Lock()
         self._remote_dirs_checked = False
+        
+        # 速度追踪
+        self.total_downloaded_bytes = 0
+        self.total_uploaded_bytes = 0
+        self.download_speed = 0 # bytes/s
+        self.upload_speed = 0   # bytes/s
+        self._last_speed_check = time.time()
+        self._last_downloaded = 0
+        self._last_uploaded = 0
         
         dirty_blocks = self.db.get_dirty_blocks()
         if dirty_blocks:
@@ -109,6 +120,23 @@ class BlockManager:
             threading.Thread(target=self._upload_worker, daemon=True).start()
         
         threading.Thread(target=self._cache_worker, daemon=True).start()
+        threading.Thread(target=self._speed_worker, daemon=True).start()
+
+    def _speed_worker(self):
+        while True:
+            time.sleep(2)
+            now = time.time()
+            duration = now - self._last_speed_check
+            if duration > 0:
+                self.download_speed = (self.total_downloaded_bytes - self._last_downloaded) / duration
+                self.upload_speed = (self.total_uploaded_bytes - self._last_uploaded) / duration
+                
+                if self.download_speed > 0 or self.upload_speed > 0:
+                    logger.info(f"BM Speed Update: DOWN={self.download_speed}, UP={self.upload_speed}, total_up={self.total_uploaded_bytes}")
+                
+                self._last_downloaded = self.total_downloaded_bytes
+                self._last_uploaded = self.total_uploaded_bytes
+                self._last_speed_check = now
 
     def _get_block_path(self, block_id):
         return os.path.join(self.cache_dir, f"{self.img_name}_blk_{block_id:08d}.dat")
@@ -175,7 +203,18 @@ class BlockManager:
                                     if attempt > 0:
                                         import random
                                         time.sleep(random.uniform(0.5, 2.0))
-                                    self.client.upload_file(block_path, remote_file_path, overwrite=True)
+                                    
+                                    # 使用回调函数实时更新上传流量
+                                    last_transferred = 0
+                                    def upload_callback(transferred):
+                                        nonlocal last_transferred
+                                        diff = transferred - last_transferred
+                                        if diff > 0:
+                                            self.total_uploaded_bytes += diff
+                                            # logger.debug(f"Uploaded {diff} bytes, total {self.total_uploaded_bytes}")
+                                        last_transferred = transferred
+                                        
+                                    self.client.upload_file(block_path, remote_file_path, overwrite=True, callback=upload_callback)
                                     self.db.set_block_status(block_id, 'cached', remote_exists=1)
                                     break
                                 except Exception as e:
@@ -229,13 +268,26 @@ class BlockManager:
             if not os.path.exists(block_path):
                 if self.use_remote and (remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat")):
                     try:
-                        self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path)
+                        with self.downloading_lock: self.downloading_count += 1
+                        
+                        # 使用回调函数实时更新下载流量
+                        last_transferred = 0
+                        def download_callback(transferred):
+                            nonlocal last_transferred
+                            diff = transferred - last_transferred
+                            if diff > 0:
+                                self.total_downloaded_bytes += diff
+                            last_transferred = transferred
+                            
+                        self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path, callback=download_callback)
                         self.db.set_block_status(block_id, 'cached', remote_exists=1)
                     except Exception as e:
                         logger.error(f"Download block {block_id} failed: {e}")
                         result[bytes_read:bytes_read+chunk_len] = b'\x00' * chunk_len
                         bytes_read += chunk_len
                         continue
+                    finally:
+                        with self.downloading_lock: self.downloading_count -= 1
                 else:
                     result[bytes_read:bytes_read+chunk_len] = b'\x00' * chunk_len
                     bytes_read += chunk_len
@@ -268,10 +320,23 @@ class BlockManager:
             if not os.path.exists(block_path):
                 if self.use_remote and (remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat")):
                     try:
-                        self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path)
+                        with self.downloading_lock: self.downloading_count += 1
+                        
+                        # 使用回调函数实时更新下载流量
+                        last_transferred = 0
+                        def download_callback(transferred):
+                            nonlocal last_transferred
+                            diff = transferred - last_transferred
+                            if diff > 0:
+                                self.total_downloaded_bytes += diff
+                            last_transferred = transferred
+                            
+                        self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path, callback=download_callback)
                         self.db.set_block_status(block_id, 'cached', remote_exists=1)
                     except:
-                        with open(block_path, 'wb') as f: f.truncate(self.block_size)
+                        pass
+                    finally:
+                        with self.downloading_lock: self.downloading_count -= 1
                 else:
                     with open(block_path, 'wb') as f: f.truncate(self.block_size)
             try:
