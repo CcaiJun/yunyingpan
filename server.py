@@ -43,6 +43,8 @@ class MountConfig(BaseModel):
     concurrency: int = 5
     inode_ratio: int = 4194304  # 默认 4MB (对应 largefile4)
     driver_mode: str = "fuse" # fuse or nbd
+    upload_limit_kb: int = 0
+    download_limit_kb: int = 0
 
 class DiskInstance:
     def __init__(self, config: MountConfig):
@@ -108,7 +110,8 @@ def do_mount(inst: DiskInstance):
                 dav_url=cfg.dav_url, dav_user=cfg.dav_user, dav_password=cfg.dav_password, 
                 cache_dir=cfg.cache_dir, disk_size_gb=cfg.disk_size_gb,
                 max_cache_size_gb=cfg.max_cache_gb, block_size_mb=cfg.block_size_mb,
-                img_name=cfg.disk_name, remote_path=cfg.remote_path, concurrency=cfg.concurrency
+                img_name=cfg.disk_name, remote_path=cfg.remote_path, concurrency=cfg.concurrency,
+                upload_limit_kb=cfg.upload_limit_kb, download_limit_kb=cfg.download_limit_kb
             )
 
             def start_fuse():
@@ -149,7 +152,8 @@ def do_mount(inst: DiskInstance):
                 dav_url=cfg.dav_url, dav_user=cfg.dav_user, dav_password=cfg.dav_password, 
                 cache_dir=cfg.cache_dir, disk_size_gb=cfg.disk_size_gb,
                 max_cache_size_gb=cfg.max_cache_gb, block_size_mb=cfg.block_size_mb,
-                img_name=cfg.disk_name, remote_path=cfg.remote_path, concurrency=cfg.concurrency
+                img_name=cfg.disk_name, remote_path=cfg.remote_path, concurrency=cfg.concurrency,
+                upload_limit_kb=cfg.upload_limit_kb, download_limit_kb=cfg.download_limit_kb
             )
             inst.vdrive = bm # 兼容状态检查中的上传队列统计
             
@@ -444,6 +448,12 @@ async def mount_drive(config: MountConfig):
             raise HTTPException(status_code=400, detail=f"禁止修改关键属性: {', '.join(locked_changes)}。修改这些属性会导致现有数据损坏。")
         
         # 更新可变属性
+        # 更新速率限制
+        if existing_instance.vdrive:
+            bm = existing_instance.vdrive if existing_instance.config.driver_mode == "nbd" else existing_instance.vdrive.bm
+            bm.upload_limiter.set_limit(config.upload_limit_kb)
+            bm.download_limiter.set_limit(config.download_limit_kb)
+
         existing_instance.config = config
         instance = existing_instance
     else:

@@ -4,10 +4,56 @@ import sqlite3
 import time
 import logging
 import threading
+import collections
 from webdav4.client import Client as WebDAVClient
 from httpx import Timeout, Limits
 
 logger = logging.getLogger(__name__)
+
+class RateLimiter:
+    def __init__(self, limit_kb_s):
+        self.limit = limit_kb_s * 1024 if limit_kb_s > 0 else 0
+        # 初始令牌设为 0，防止刚开始时出现巨大的突发流量
+        self.tokens = 0
+        # 令牌桶最大容量：限速值的一半，或者至少 1MB
+        # 减小桶大小可以显著减少“传输一阵停一阵”的现象
+        self.max_tokens = max(self.limit * 0.5, 1024 * 1024)
+        self.last_update = time.time()
+        self.lock = threading.Lock()
+
+    def set_limit(self, limit_kb_s):
+        with self.lock:
+            self.limit = limit_kb_s * 1024 if limit_kb_s > 0 else 0
+            self.max_tokens = max(self.limit * 0.5, 1024 * 1024)
+            # 调整限速时重置令牌，避免突发
+            self.tokens = 0
+            self.last_update = time.time()
+
+    def request(self, amount):
+        if self.limit <= 0:
+            return
+
+        while amount > 0:
+            wait_time = 0
+            with self.lock:
+                now = time.time()
+                elapsed = now - self.last_update
+                # 补充令牌，但不超过 max_tokens
+                self.tokens = min(self.max_tokens, self.tokens + elapsed * self.limit)
+                self.last_update = now
+
+                if self.tokens > 0:
+                    # 尽可能消耗现有令牌
+                    consume = min(amount, self.tokens)
+                    self.tokens -= consume
+                    amount -= consume
+                
+                if amount > 0:
+                    # 计算还需要等待的时间，但限制单次等待时长以保持响应性
+                    wait_time = min(amount / self.limit, 0.1)
+            
+            if wait_time > 0:
+                time.sleep(wait_time)
 
 class MetadataDB:
     def __init__(self, db_path):
@@ -69,7 +115,8 @@ class MetadataDB:
 
 class BlockManager:
     def __init__(self, dav_url, dav_user, dav_password, cache_dir, disk_size_gb, max_cache_size_gb, 
-                 block_size_mb=4, img_name="virtual_disk.img", remote_path="blocks", concurrency=4):
+                 block_size_mb=4, img_name="virtual_disk.img", remote_path="blocks", concurrency=4,
+                 upload_limit_kb=0, download_limit_kb=0):
         self.use_remote = bool(dav_url and dav_url.strip())
         if self.use_remote:
             limits = Limits(max_connections=concurrency * 2, max_keepalive_connections=concurrency)
@@ -89,6 +136,10 @@ class BlockManager:
         self.img_name = img_name if img_name.endswith('.img') else f"{img_name}.img"
         self.remote_path = remote_path.strip('/')
         self.concurrency = concurrency
+        
+        # 速率限制器
+        self.upload_limiter = RateLimiter(upload_limit_kb)
+        self.download_limiter = RateLimiter(download_limit_kb)
         
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
@@ -111,6 +162,11 @@ class BlockManager:
         self._last_downloaded = 0
         self._last_uploaded = 0
         
+        # 滑动窗口平均速度
+        self._speed_window_size = 5 # 记录最近 5 次（约 10 秒）的快照
+        self._download_history = collections.deque(maxlen=self._speed_window_size)
+        self._upload_history = collections.deque(maxlen=self._speed_window_size)
+        
         dirty_blocks = self.db.get_dirty_blocks()
         if dirty_blocks:
             for bid in dirty_blocks:
@@ -128,11 +184,19 @@ class BlockManager:
             now = time.time()
             duration = now - self._last_speed_check
             if duration > 0:
-                self.download_speed = (self.total_downloaded_bytes - self._last_downloaded) / duration
-                self.upload_speed = (self.total_uploaded_bytes - self._last_uploaded) / duration
+                curr_down = (self.total_downloaded_bytes - self._last_downloaded) / duration
+                curr_up = (self.total_uploaded_bytes - self._last_uploaded) / duration
+                
+                # 添加到历史记录
+                self._download_history.append(curr_down)
+                self._upload_history.append(curr_up)
+                
+                # 计算平均值以实现平滑显示
+                self.download_speed = sum(self._download_history) / len(self._download_history)
+                self.upload_speed = sum(self._upload_history) / len(self._upload_history)
                 
                 if self.download_speed > 0 or self.upload_speed > 0:
-                    logger.info(f"BM Speed Update: DOWN={self.download_speed}, UP={self.upload_speed}, total_up={self.total_uploaded_bytes}")
+                    logger.info(f"BM Speed Update (Smoothed): DOWN={self.download_speed:.2f}, UP={self.upload_speed:.2f}")
                 
                 self._last_downloaded = self.total_downloaded_bytes
                 self._last_uploaded = self.total_uploaded_bytes
@@ -210,6 +274,7 @@ class BlockManager:
                                         nonlocal last_transferred
                                         diff = transferred - last_transferred
                                         if diff > 0:
+                                            self.upload_limiter.request(diff)
                                             self.total_uploaded_bytes += diff
                                             # logger.debug(f"Uploaded {diff} bytes, total {self.total_uploaded_bytes}")
                                         last_transferred = transferred
@@ -276,6 +341,7 @@ class BlockManager:
                             nonlocal last_transferred
                             diff = transferred - last_transferred
                             if diff > 0:
+                                self.download_limiter.request(diff)
                                 self.total_downloaded_bytes += diff
                             last_transferred = transferred
                             
@@ -328,6 +394,7 @@ class BlockManager:
                             nonlocal last_transferred
                             diff = transferred - last_transferred
                             if diff > 0:
+                                self.download_limiter.request(diff)
                                 self.total_downloaded_bytes += diff
                             last_transferred = transferred
                             

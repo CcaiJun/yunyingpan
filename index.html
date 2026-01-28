@@ -187,6 +187,14 @@
                             <input type="number" id="max_cache_gb" value="10" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                         </div>
                         <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">上传速度限制 (KB/s)</label>
+                            <input type="number" id="upload_limit_kb" value="0" min="0" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" title="0 表示不限制">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">下载速度限制 (KB/s)</label>
+                            <input type="number" id="download_limit_kb" value="0" min="0" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" title="0 表示不限制">
+                        </div>
+                        <div>
                             <label class="block text-sm font-medium text-slate-700 mb-2">Inode 比例 (字节/Inode)</label>
                             <select id="inode_ratio" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                                 <option value="4096">4 KB (极多小文件)</option>
@@ -299,6 +307,14 @@
                             <input type="number" id="edit_max_cache_gb" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                         </div>
                         <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">上传速度限制 (KB/s)</label>
+                            <input type="number" id="edit_upload_limit_kb" min="0" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" title="0 表示不限制">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">下载速度限制 (KB/s)</label>
+                            <input type="number" id="edit_download_limit_kb" min="0" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" title="0 表示不限制">
+                        </div>
+                        <div>
                             <label class="block text-sm font-medium text-slate-700 mb-2">Inode 比例 (字节/Inode)</label>
                             <select id="edit_inode_ratio" disabled class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed outline-none" title="磁盘创建后，此项不可修改">
                                 <option value="4096">4 KB (极多小文件)</option>
@@ -379,6 +395,8 @@
                 block_size_mb: parseInt(document.getElementById('block_size_mb').value),
                 disk_size_gb: parseInt(document.getElementById('disk_size_gb').value),
                 max_cache_gb: parseInt(document.getElementById('max_cache_gb').value),
+                upload_limit_kb: parseInt(document.getElementById('upload_limit_kb').value || 0),
+                download_limit_kb: parseInt(document.getElementById('download_limit_kb').value || 0),
                 concurrency: parseInt(document.getElementById('concurrency').value),
                 inode_ratio: parseInt(document.getElementById('inode_ratio').value),
                 driver_mode: document.getElementById('driver_mode').value
@@ -505,10 +523,16 @@
                         <div class="text-center border-r border-slate-200">
                             <div class="text-[10px] text-slate-500 uppercase font-bold">下载速度</div>
                             <div class="text-sm font-mono text-blue-600">${formatSpeed(disk.download_speed || 0)}</div>
+                            <div class="text-[9px] text-slate-400 mt-1">
+                                <i class="fas fa-tachometer-alt mr-1"></i>限速: ${disk.config.download_limit_kb > 0 ? disk.config.download_limit_kb + ' KB/s' : '无限制'}
+                            </div>
                         </div>
                         <div class="text-center">
                             <div class="text-[10px] text-slate-500 uppercase font-bold">上传速度</div>
                             <div class="text-sm font-mono text-green-600">${formatSpeed(disk.upload_speed || 0)}</div>
+                            <div class="text-[9px] text-slate-400 mt-1">
+                                <i class="fas fa-tachometer-alt mr-1"></i>限速: ${disk.config.upload_limit_kb > 0 ? disk.config.upload_limit_kb + ' KB/s' : '无限制'}
+                            </div>
                         </div>
                     </div>
 
@@ -571,6 +595,8 @@
                          document.getElementById('edit_block_size_mb').value = disk.config.block_size_mb;
                          document.getElementById('edit_disk_size_gb').value = disk.config.disk_size_gb;
                          document.getElementById('edit_max_cache_gb').value = disk.config.max_cache_gb;
+                         document.getElementById('edit_upload_limit_kb').value = disk.config.upload_limit_kb || 0;
+                         document.getElementById('edit_download_limit_kb').value = disk.config.download_limit_kb || 0;
                           document.getElementById('edit_concurrency').value = disk.config.concurrency || 5;
                           document.getElementById('edit_inode_ratio').value = disk.config.inode_ratio || 4194304;
                           document.getElementById('edit_driver_mode').value = disk.config.driver_mode || "fuse";
@@ -607,6 +633,8 @@
                  block_size_mb: parseInt(document.getElementById('edit_block_size_mb').value),
                  disk_size_gb: parseInt(document.getElementById('edit_disk_size_gb').value),
                   max_cache_gb: parseInt(document.getElementById('edit_max_cache_gb').value),
+                  upload_limit_kb: parseInt(document.getElementById('edit_upload_limit_kb').value || 0),
+                  download_limit_kb: parseInt(document.getElementById('edit_download_limit_kb').value || 0),
                   concurrency: parseInt(document.getElementById('edit_concurrency').value),
                   inode_ratio: parseInt(document.getElementById('edit_inode_ratio').value),
                   driver_mode: document.getElementById('edit_driver_mode').value,

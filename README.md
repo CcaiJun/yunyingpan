@@ -1,26 +1,38 @@
-# Yingpan (影盘) - 虚拟 WebDAV 硬盘
+# Yingpan (影盘) - 虚拟 WebDAV 块设备硬盘
 
-Yingpan 是一个基于 Python 开发的虚拟硬盘管理工具，它通过 FUSE 技术将 WebDAV 云存储映射为本地的 `.img` 镜像文件，并挂载为本地磁盘。这让你可以像使用普通硬盘一样使用云盘（如 123云盘、阿里云盘等支持 WebDAV 的服务），支持直接运行程序、读写文件。
+Yingpan 是一个基于 Python 开发的高性能虚拟硬盘管理工具。它将 WebDAV 云存储（如 123云盘、阿里云盘等）抽象为底层的**块设备**，支持通过 **FUSE** 或 **NBD (Network Block Device)** 技术映射为本地磁盘。
+
+与传统的 WebDAV 挂载工具不同，Yingpan 采用分块存储方案，将云端视为一个巨大的硬盘，支持直接在上面进行 `mkfs` 格式化（推荐 ext4），并像使用普通物理硬盘一样进行读写、运行程序或作为 Docker 卷使用。
 
 ## 核心特性
 
-- **WebDAV 转本地盘**: 支持将任何标准 WebDAV 服务挂载为本地 ext4 文件系统。
-- **高性能分块缓存**: 采用分块加载技术，仅下载正在读取的数据块，大幅提升响应速度。
-- **智能后台上传**: 写入操作先存入本地缓存，由后台线程异步上传至云端，保证操作流畅。
-- **图形化管理界面**: 内置基于 FastAPI 的 Web 控制台，支持磁盘创建、挂载、卸载及状态监控。
-- **持久化配置**: 磁盘配置自动保存，支持服务重启后自动重连。
-- **Systemd 集成**: 提供一键部署脚本，支持开机自启和故障自恢复。
+- **双驱动模式支持**:
+  - **FUSE 模式**: 生成虚拟 `.img` 镜像文件，通过 Loop 设备挂载，兼容性好。
+  - **NBD 模式**: 高性能块设备驱动，直接与 Linux 内核块层通信，效率更高。
+- **分块存储管理 (Block-based)**:
+  - 将磁盘切分为固定大小（默认 4MB）的块。
+  - 仅在访问时按需下载对应的数据块，大幅节省流量和等待时间。
+- **智能本地缓存 (LRU)**:
+  - 采用 SQLite 管理元数据，支持热点数据本地缓存。
+  - 可自定义最大缓存容量，自动清理最久未访问的数据块。
+- **异步后台上传 (Write-Back)**:
+  - 写入操作首先存入本地“脏块”区域并立即返回，由后台线程池并发异步上传至云端，确保本地 IO 体验。
+- **图形化管理控制台**:
+  - 内置基于 FastAPI 的 Web 界面。
+  - 实时监控：上传/下载速度、队列状态、缓存占用率等。
+- **系统级集成**:
+  - 提供 `systemd` 服务支持，实现开机自启、故障自恢复。
 
 ## 快速部署
 
 ### 环境要求
-- Linux 系统 (推荐 Ubuntu/Debian/CentOS)
-- Python 3.8+
-- Root 权限 (用于挂载 FUSE 和 Loop 设备)
+- **操作系统**: Linux (推荐 Debian/Ubuntu/CentOS)
+- **依赖工具**: `fuse3`, `nbd-client` (如需使用 NBD 模式), `e2fsprogs`
+- **Python**: 3.8+
 
 ### 一键安装
-1. 将本项目文件夹复制到服务器。
-2. 进入目录并执行部署脚本：
+1. 将本项目复制到服务器。
+2. 执行部署脚本进行初始化和环境配置：
    ```bash
    cd yingpan
    sudo ./deploy.sh
@@ -29,36 +41,36 @@ Yingpan 是一个基于 Python 开发的虚拟硬盘管理工具，它通过 FUS
 ## 使用说明
 
 ### 1. 访问控制台
-部署完成后，打开浏览器访问：
-`http://你的服务器IP:8001`
+部署完成后，通过浏览器访问管理页面：
+`http://服务器IP:8001`
 
-### 2. 创建磁盘
-在“新增磁盘”页面填写以下信息：
-- **WebDAV URL**: 云盘的 WebDAV 地址。
-- **账号/密码**: 您的云盘登录凭据。
-- **磁盘容量**: 虚拟出的硬盘大小（例如 1024G）。
-- **挂载路径**: FUSE 层挂载路径（如 `/mnt/fdisk2`）。
-- **缓存目录**: 本地缓存存放位置（如 `/var/cache/v_drive`）。
+### 2. 配置磁盘
+在 Web 界面中“新增磁盘”，关键参数说明：
+- **驱动模式**: 选择 `fuse` (更通用) 或 `nbd` (更高效)。
+- **WebDAV URL**: 云盘 WebDAV 终端地址。
+- **磁盘容量**: 虚拟出的硬盘总大小（例如 2048G）。
+- **缓存上限**: 本地磁盘允许占用的最大缓存空间。
+- **并发数**: WebDAV 上传/下载的并发线程数，建议 4-8。
 
-### 3. 本地使用
-磁盘挂载成功后，会自动挂载到 `/mnt/v_disks/磁盘名`。您可以直接通过命令行或文件管理器访问该目录。
+### 3. 系统挂载
+磁盘状态变为 `running` 后，应用会自动将其挂载到：
+`/mnt/v_disks/[磁盘名]`
+你可以直接在这个目录下读写文件。
 
 ## 管理服务
 
-使用标准 `systemd` 命令管理应用：
-- **启动**: `sudo systemctl start yingpan`
-- **停止**: `sudo systemctl stop yingpan`
-- **重启**: `sudo systemctl restart yingpan`
-- **查看日志**: `tail -f server.log`
+- **启动服务**: `sudo systemctl start yingpan`
+- **停止服务**: `sudo systemctl stop yingpan`
+- **查看实时日志**: `tail -f server.log`
 
 ## 项目结构
-- `server.py`: FastAPI 后端服务，负责 API 和逻辑控制。
-- `v_drive.py`: 核心 FUSE 实现，负责 WebDAV 与块设备的映射。
-- `index.html`: 管理控制台前端页面。
-- `deploy.sh`: 自动化部署与服务配置脚本。
-- `disks_config.json`: 硬盘配置文件（自动生成）。
+- [server.py](file:///root/yingpan/server.py): FastAPI 后端，负责 API 路由与磁盘生命周期管理。
+- [block_manager.py](file:///root/yingpan/block_manager.py): 核心块管理逻辑，负责缓存控制与 WebDAV 同步。
+- [v_drive.py](file:///root/yingpan/v_drive.py): FUSE 驱动实现。
+- [nbd_server.py](file:///root/yingpan/nbd_server.py): NBD 驱动服务端实现。
+- [index.html](file:///root/yingpan/index.html): 现代化的 Web 管理控制台。
 
 ## 注意事项
-- 请确保服务器已安装 `fuse3`。
-- 对于大容量硬盘，首次格式化（mkfs）可能需要几分钟时间，请耐心等待状态变为 `running`。
-- 缓存目录建议设置在 SSD 上以获得最佳性能。
+- **首次格式化**: 大容量磁盘在首次挂载时会进行 `mkfs.ext4`，可能需要 1-3 分钟，请稍后刷新状态。
+- **安全性**: 建议在受信任的网络环境中使用，或为 Web 控制台添加反向代理认证。
+- **NBD 模式**: 使用 NBD 模式前，请确保内核已加载 nbd 模块 (`modprobe nbd`)。
