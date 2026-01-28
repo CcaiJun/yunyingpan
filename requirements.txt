@@ -3,3 +3,5 @@ webdav4==0.10.0
 fastapi==0.109.0
 uvicorn==0.27.0
 requests==2.31.0
+psutil==5.9.8
+httpx>=0.24.0

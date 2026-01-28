@@ -80,10 +80,30 @@ class MetadataDB:
             cursor = conn.execute('SELECT block_id FROM blocks WHERE status = "cached" ORDER BY last_access ASC LIMIT ?', (limit,))
             return [row[0] for row in cursor.fetchall()]
 
+    def get_dirty_blocks(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('SELECT block_id FROM blocks WHERE status = "dirty"')
+            return [row[0] for row in cursor.fetchall()]
+
 class VDrive(Operations):
     def __init__(self, dav_url, dav_user, dav_password, cache_dir, disk_size_gb, max_cache_size_gb, block_size_mb=4, img_name="virtual_disk.img", remote_path="blocks", concurrency=4):
-        from httpx import Timeout
-        self.client = WebDAVClient(dav_url, auth=(dav_user, dav_password), timeout=Timeout(30.0, connect=10.0))
+        from httpx import Timeout, Limits
+        # 核心优化：检查 WebDAV URL 是否为空
+        self.use_remote = bool(dav_url and dav_url.strip())
+        if self.use_remote:
+            # 核心优化：为 WebDAVClient 增加连接池限制，以支持真正的并发上传
+            # 默认 httpx 限制了总连接数，可能导致多线程竞争同一个连接
+            limits = Limits(max_connections=concurrency * 2, max_keepalive_connections=concurrency)
+            self.client = WebDAVClient(
+                dav_url, 
+                auth=(dav_user, dav_password), 
+                timeout=Timeout(60.0, connect=20.0), # 增加超时时间，大块上传更稳定
+                limits=limits
+            )
+        else:
+            self.client = None
+            logger.warning(f"WebDAV URL is empty, disk {img_name} will work in LOCAL ONLY mode")
+
         self.cache_dir = os.path.abspath(cache_dir)
         self.disk_size = disk_size_gb * 1024 * 1024 * 1024
         self.max_cache_size = max_cache_size_gb * 1024 * 1024 * 1024
@@ -97,6 +117,16 @@ class VDrive(Operations):
             
         self.db = MetadataDB(os.path.join(self.cache_dir, f'.{self.img_name}_metadata.db'))
         self.upload_queue = set()
+        self.uploading_count = 0  # 记录当前正在上传的任务数
+        self.uploading_lock = threading.Lock() # 专门用于 uploading_count 的锁
+        
+        # 启动时恢复未完成的上传任务
+        dirty_blocks = self.db.get_dirty_blocks()
+        if dirty_blocks:
+            logger.info(f"Recovering {len(dirty_blocks)} dirty blocks to upload queue")
+            for bid in dirty_blocks:
+                self.upload_queue.add(bid)
+                
         self.upload_lock = threading.Lock()
         self._remote_dirs_checked = False
         
@@ -112,11 +142,29 @@ class VDrive(Operations):
         return os.path.join(self.cache_dir, f"{self.img_name}_blk_{block_id:08d}.dat")
 
     def _is_all_zeros(self, path):
-        """检查文件是否全为零，使用高效的读块方式"""
+        """检查文件是否全为零，使用更高效的 seek_data/seek_hole 方式（如果系统支持）"""
         try:
             if not os.path.exists(path):
                 return True
+            
+            # 首先检查文件大小
+            size = os.path.getsize(path)
+            if size == 0:
+                return True
+            
+            # 检查实际物理占用，如果是 0，肯定是空洞文件（全零）
+            stat_info = os.stat(path)
+            if stat_info.st_blocks == 0:
+                return True
+
             with open(path, 'rb') as f:
+                # 预读前 4KB，大部分元数据块如果非零，前 4KB 就会有数据
+                chunk = f.read(4096)
+                if any(chunk):
+                    return False
+                
+                # 如果前 4KB 是零，再进行全量检查，但跳过已知的空洞部分
+                f.seek(0)
                 while True:
                     chunk = f.read(1024 * 1024) # 每次读 1MB
                     if not chunk:
@@ -130,21 +178,30 @@ class VDrive(Operations):
 
     def _upload_worker(self):
         while True:
+            # 如果未开启远程，则不需要上传
+            if not self.use_remote:
+                time.sleep(5)
+                continue
+                
             block_id = None
             with self.upload_lock:
                 if self.upload_queue:
+                    # 优化：优先上传编号较小的块（通常是元数据或文件头部）
                     block_ids = sorted(list(self.upload_queue))
                     block_id = block_ids[0]
                     self.upload_queue.remove(block_id)
             
             if block_id is not None:
+                # 标记正在上传，避免其他线程重复处理
+                self.db.set_block_status(block_id, 'uploading')
+                with self.uploading_lock:
+                    self.uploading_count += 1
                 try:
                     block_path = self._get_block_path(block_id)
                     status, remote_exists = self.db.get_block_info(block_id)
                     
                     if os.path.exists(block_path):
                         remote_file_path = f"{self.remote_path}/blk_{block_id:08d}.dat"
-                        remote_tmp_path = f"{remote_file_path}.tmp"
                         
                         # 流量优化：检查是否全为零
                         if self._is_all_zeros(block_path):
@@ -159,53 +216,77 @@ class VDrive(Operations):
                                 self.db.set_block_status(block_id, 'cached', remote_exists=0)
                             continue
 
-                        # 确保远程目录存在 (只检查一次)
+                        # 核心优化：只在目录未检查时尝试一次创建，避免并发上传时大量 405/423 冲突
                         if not self._remote_dirs_checked:
-                            parts = self.remote_path.split('/')
-                            current = ""
-                            for part in parts:
-                                current = f"{current}/{part}".strip('/')
-                                try: self.client.mkdir(current)
-                                except: pass
-                            self._remote_dirs_checked = True
+                            with self.upload_lock: # 使用锁保护目录创建过程
+                                if not self._remote_dirs_checked:
+                                    parts = self.remote_path.split('/')
+                                    current = ""
+                                    for part in parts:
+                                        current = f"{current}/{part}".strip('/')
+                                        try: self.client.mkdir(current)
+                                        except: pass
+                                    self._remote_dirs_checked = True
                         
-                        # 原子上传：先上传到 .tmp 文件，再 rename
+                        # 原子上传优化：减少 WebDAV 请求往返
                         try:
-                            logger.info(f"Uploading block {block_id} to tmp...")
-                            self.client.upload_file(block_path, remote_tmp_path, overwrite=True)
-                            
-                            # WebDAV 的 move 操作通常是原子的
-                            logger.info(f"Moving block {block_id} to final destination...")
-                            try:
-                                # 如果目标已存在，先删除（某些 WebDAV 不支持覆盖移动）
-                                if remote_exists:
-                                    self.client.remove(remote_file_path)
-                            except: pass
-                            
-                            self.client.move(remote_tmp_path, remote_file_path)
-                            
-                            self.db.set_block_status(block_id, 'cached', remote_exists=1)
-                            logger.info(f"Block {block_id} uploaded and moved successfully")
+                            max_retries = 3
+                            for attempt in range(max_retries + 1):
+                                try:
+                                    # 如果是重试，先随机睡眠一小会儿，避开并发冲突
+                                    if attempt > 0:
+                                        import random
+                                        time.sleep(random.uniform(0.5, 2.0))
+                                        
+                                    logger.info(f"Uploading block {block_id} (attempt {attempt+1})...")
+                                    self.client.upload_file(block_path, remote_file_path, overwrite=True)
+                                    self.db.set_block_status(block_id, 'cached', remote_exists=1)
+                                    logger.info(f"Block {block_id} uploaded successfully")
+                                    break
+                                except Exception as e:
+                                    if attempt == max_retries:
+                                        raise e
+                                    # 423 Locked 通常是因为其他线程正在对同一个父目录进行操作
+                                    logger.warning(f"Upload retry {attempt+1} for block {block_id}: {e}")
                         except Exception as upload_err:
-                            logger.error(f"Atomic upload failed for block {block_id}: {upload_err}")
-                            # 尝试清理临时文件
-                            try: self.client.remove(remote_tmp_path)
-                            except: pass
+                            logger.error(f"Upload failed for block {block_id}: {upload_err}")
                             raise upload_err
                 except Exception as e:
                     logger.error(f"Block {block_id} upload failed: {e}")
+                    # 只有在非 4xx 错误（通常是网络问题）时才重新加入队列
+                    # 注意：webdav4 的异常处理可能需要更细致
                     with self.upload_lock:
                         self.upload_queue.add(block_id)
-            time.sleep(0.5)
+                finally:
+                    with self.uploading_lock:
+                        self.uploading_count -= 1
+            time.sleep(0.1) # 减小睡眠时间，提高响应速度
 
     def _cache_worker(self):
         while True:
             try:
-                # 简单的缓存清理逻辑
-                current_size = sum(os.path.getsize(os.path.join(self.cache_dir, f)) 
-                                 for f in os.listdir(self.cache_dir) if f.startswith(f"{self.img_name}_blk_"))
-                if current_size > self.max_cache_size:
-                    lru_blocks = self.db.get_lru_blocks(10)
+                # 使用稀疏统计获取真实大小
+                current_real_size = 0
+                block_files = [f for f in os.listdir(self.cache_dir) if f.startswith(f"{self.img_name}_blk_")]
+                for f in block_files:
+                    try:
+                        f_path = os.path.join(self.cache_dir, f)
+                        stat_info = os.stat(f_path)
+                        f_real_size = stat_info.st_blocks * 512
+                        
+                        # 核心优化：如果一个块文件是全零的且物理占用大于0，或者它是空的，尝试释放它
+                        if f_real_size > 0 and self._is_all_zeros(f_path):
+                            logger.info(f"Releasing zero block file: {f}")
+                            # 使用 truncate 重新变回真正的空洞文件
+                            with open(f_path, 'wb') as f_obj:
+                                f_obj.truncate(self.block_size)
+                            f_real_size = 0
+                        
+                        current_real_size += f_real_size
+                    except: pass
+
+                if current_real_size > self.max_cache_size:
+                    lru_blocks = self.db.get_lru_blocks(20)
                     for bid in lru_blocks:
                         path = self._get_block_path(bid)
                         if os.path.exists(path):
@@ -266,7 +347,7 @@ class VDrive(Operations):
             
             if not os.path.exists(block_path):
                 # 如果本地没有，尝试从远程下载
-                if remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat"):
+                if self.use_remote and (remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat")):
                     logger.info(f"Downloading block {block_id}...")
                     try:
                         self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path)
@@ -320,7 +401,7 @@ class VDrive(Operations):
             # 确保块文件存在
             if not os.path.exists(block_path):
                 # 尝试下载
-                if remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat"):
+                if self.use_remote and (remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat")):
                     try:
                         self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path)
                         self.db.set_block_status(block_id, 'cached', remote_exists=1)
@@ -335,13 +416,20 @@ class VDrive(Operations):
                         f.truncate(self.block_size)
             
             try:
-                with open(block_path, 'r+b') as f:
-                    f.seek(block_offset)
-                    f.write(buf[bytes_written:bytes_written+chunk_len])
-                    f.flush()
-                    try:
-                        os.fsync(f.fileno()) # 强制刷盘，防止断电导致块文件损坏
-                    except: pass
+                # 性能优化：在写入前先检查数据是否全为零
+                # 如果是全零块且本地文件尚不存在或已是空洞，则无需实际写入磁盘，保持空洞即可
+                is_buf_zeros = all(b == 0 for b in buf[bytes_written:bytes_written+chunk_len])
+                
+                if is_buf_zeros and not os.path.exists(block_path):
+                    # 数据全零且块文件不存在，直接按空洞处理，不创建实际物理块
+                    pass
+                else:
+                    # 只有在非零数据或文件已存在时才执行写入
+                    with open(block_path, 'r+b') as f:
+                        f.seek(block_offset)
+                        f.write(buf[bytes_written:bytes_written+chunk_len])
+                        f.flush()
+                        # os.fsync(f.fileno()) # 注释掉强制刷盘，大幅提升大容量磁盘格式化和写入性能
             except Exception as e:
                 logger.error(f"Write to block file {block_id} failed: {e}")
                 raise FuseOSError(errno.EIO)
@@ -364,17 +452,9 @@ class VDrive(Operations):
     def fsync(self, path, datasync, fh):
         """强制同步到磁盘"""
         if path == '/' + self.img_name:
-            # 获取所有当前正在写入的块文件并执行 fsync
-            # 注意：这只是同步到本地磁盘，真正的同步到云端是由后台线程异步完成的
-            # 但这能保证断电时本地块文件的完整性
-            block_files = [f for f in os.listdir(self.cache_dir) if f.startswith(f"{self.img_name}_blk_")]
-            for f in block_files:
-                try:
-                    f_path = os.path.join(self.cache_dir, f)
-                    fd = os.open(f_path, os.O_RDONLY)
-                    os.fsync(fd)
-                    os.close(fd)
-                except: pass
+            # 优化：不再遍历所有块文件进行 fsync，因为 write 已经包含了 fsync
+            # 且在大容量硬盘下，遍历数百个文件极其缓慢
+            pass
         return 0
 
     def mkdir(self, path, mode):

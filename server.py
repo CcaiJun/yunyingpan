@@ -128,9 +128,14 @@ def do_mount(inst: DiskInstance):
 
         import time
         max_wait = 300 # 增加等待时间，大容量硬盘初始化较慢
-        while not os.path.exists(img_path) and max_wait > 0:
-            if inst.status == "error": # FUSE 启动失败
-                return
+        while max_wait > 0:
+            if not inst.thread.is_alive():
+                logger.error(f"FUSE process died while waiting for {img_path}")
+                raise Exception("FUSE 进程异常退出，请检查日志")
+            
+            if os.path.exists(img_path):
+                break
+                
             time.sleep(1)
             max_wait -= 1
 
@@ -154,9 +159,15 @@ def do_mount(inst: DiskInstance):
 
         if needs_format:
             logger.info(f"Formatting disk {cfg.disk_name}...")
-            # 对于 1024G 等大容量硬盘，使用 -T largefile4 减少 inode 数量，大幅降低元数据写入量
-            # -E lazy_itable_init=1,lazy_journal_init=1 也可以加速格式化过程
-            subprocess.run(['mkfs.ext4', '-F', '-T', 'largefile4', '-b', '4096', '-E', 'lazy_itable_init=1,lazy_journal_init=1', img_path], check=True)
+            # 增加 -O ^metadata_csum 以提高与某些内核的兼容性，并减少元数据开销
+            try:
+                subprocess.run(['mkfs.ext4', '-F', '-T', 'largefile4', '-b', '4096', 
+                              '-O', '^metadata_csum',
+                              '-E', 'lazy_itable_init=1,lazy_journal_init=1', img_path], check=True)
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"Standard mkfs failed, trying fallback options for {cfg.disk_name}...")
+                # 备用方案：去掉复杂的优化参数，使用最基础的格式化
+                subprocess.run(['mkfs.ext4', '-F', img_path], check=True)
 
         logger.info(f"Final loop mount: {img_path} -> {inst.final_mountpoint}")
         try:
@@ -234,15 +245,26 @@ async def startup_event():
                         total_size = 0
                         try:
                             if os.path.exists(instance.config.cache_dir):
-                                # 优化：只统计属于该磁盘的块文件
-                                prefix = f"{instance.config.disk_name}_blk_"
+                                # 严格匹配：v_drive.py 中使用的是 self.img_name + "_blk_"
+                                # 其中 self.img_name = disk_name + ".img" (如果原名不带.img)
+                                base_name = instance.config.disk_name
+                                if not base_name.endswith('.img'):
+                                    base_name = f"{base_name}.img"
+                                
+                                # 构建完整前缀，例如 "disk1.img_blk_"
+                                # 这样可以避免匹配到 "disk11.img_blk_"
+                                prefix = f"{base_name}_blk_"
+                                
                                 for f in os.listdir(instance.config.cache_dir):
-                                    if f.startswith(prefix):
+                                    if f.startswith(prefix) and f.endswith(".dat"):
                                         try:
                                             f_path = os.path.join(instance.config.cache_dir, f)
-                                            total_size += os.path.getsize(f_path)
+                                            # 使用 st_blocks * 512 获取文件在磁盘上实际占用的空间 (考虑稀疏文件)
+                                            stat_info = os.stat(f_path)
+                                            total_size += stat_info.st_blocks * 512
                                         except: pass
-                        except: pass
+                        except Exception as e:
+                            logger.error(f"Cache stats error for {name}: {e}")
                         instance.cache_usage_bytes = total_size
                     
                     # 3. 检测挂载状态
@@ -277,7 +299,10 @@ async def startup_event():
                     # 4. 更新上传队列大小
                     if instance.vdrive:
                         with instance.vdrive.upload_lock:
-                            instance.upload_queue_size = len(instance.vdrive.upload_queue)
+                            queue_size = len(instance.vdrive.upload_queue)
+                        with instance.vdrive.uploading_lock:
+                            uploading_size = instance.vdrive.uploading_count
+                        instance.upload_queue_size = queue_size + uploading_size
                     else:
                         instance.upload_queue_size = 0
                 
