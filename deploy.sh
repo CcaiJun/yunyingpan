@@ -25,7 +25,7 @@ fi
 # 3. 更新并安装系统依赖
 echo "正在安装系统依赖..."
 apt-get update
-apt-get install -y python3 python3-pip python3-venv fuse3 e2fsprogs jq lsof psmisc nbd-client
+apt-get install -y python3 python3-pip python3-venv fuse3 e2fsprogs jq lsof psmisc nbd-client libzstd1 liblz4-1
 
 # 4. 加载内核模块
 echo "正在加载内核模块 (FUSE & NBD)..."
