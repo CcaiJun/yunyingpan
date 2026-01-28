@@ -68,6 +68,9 @@ class DiskInstance:
         self.nbd_device = ""
         self.total_blocks = 0
         self.uploaded_blocks = 0
+        self.stored_size_bytes = 0
+        self.used_inodes = 0
+        self.total_inodes = 0
 
 def load_configs() -> List[dict]:
     if os.path.exists(CONFIG_FILE):
@@ -327,6 +330,7 @@ async def startup_event():
                             instance.upload_speed = bm.upload_speed
                             instance.download_speed = bm.download_speed
                             instance.uploaded_blocks = int(bm.db.get_remote_exists_count())
+                            instance.stored_size_bytes = instance.uploaded_blocks * (instance.config.block_size_mb * 1024 * 1024)
                             
                             if instance.upload_speed > 0 or instance.download_speed > 0:
                                 logger.info(f"Disk {name} stats: UP={instance.upload_speed:.2f}, DOWN={instance.download_speed:.2f}, Blocks={instance.uploaded_blocks}/{instance.total_blocks}")
@@ -345,6 +349,8 @@ async def startup_event():
                                         instance.uploaded_blocks = int(cursor.fetchone()[0])
                                 else:
                                     instance.uploaded_blocks = 0
+                                
+                                instance.stored_size_bytes = instance.uploaded_blocks * (instance.config.block_size_mb * 1024 * 1024)
                             except Exception:
                                 instance.uploaded_blocks = 0
                                 
@@ -357,6 +363,19 @@ async def startup_event():
 
                     # 2. 计算缓存大小 (优化：降低频率)
                     if check_cache:
+                        # 更新 Inode 使用情况 (仅在已挂载时)
+                        if instance.loop_status == "mounted" and os.path.exists(instance.final_mountpoint):
+                            try:
+                                import os as native_os
+                                st = native_os.statvfs(instance.final_mountpoint)
+                                instance.total_inodes = st.f_files
+                                instance.used_inodes = st.f_files - st.f_ffree
+                            except Exception as st_err:
+                                logger.debug(f"Failed to get statvfs for {name}: {st_err}")
+                        else:
+                            instance.total_inodes = 0
+                            instance.used_inodes = 0
+
                         total_size = 0
                         try:
                             if os.path.exists(instance.config.cache_dir):
@@ -483,6 +502,9 @@ def list_disks():
             "download_speed": instance.download_speed,
             "total_blocks": instance.total_blocks,
             "uploaded_blocks": instance.uploaded_blocks,
+            "stored_size_bytes": instance.stored_size_bytes,
+            "used_inodes": instance.used_inodes,
+            "total_inodes": instance.total_inodes,
             "error_msg": instance.error_msg,
             "final_mountpoint": instance.final_mountpoint
         })

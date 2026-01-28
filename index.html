@@ -520,6 +520,15 @@
                 const statusClass = `status-${disk.status}`;
                 const cacheMB = (disk.cache_usage_bytes / 1024 / 1024).toFixed(1);
                 
+                // 格式化存储量
+                const formatBytes = (bytes) => {
+                    if (!bytes || bytes <= 0) return '0 B';
+                    const k = 1024;
+                    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+                    const i = Math.floor(Math.log(bytes) / Math.log(k));
+                    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+                };
+                
                 // 格式化速度
                 const formatSpeed = (bytesPerSec) => {
           if (bytesPerSec <= 0) return '0 B/s';
@@ -537,45 +546,80 @@
                         <span class="status-badge ${statusClass}">${disk.status === 'running' ? '运行中' : (disk.status === 'stopped' ? '已停止' : (disk.status === 'starting' ? '启动中...' : '状态异常'))}</span>
                     </div>
                     
-                    <div class="grid grid-cols-2 gap-2 mb-4 p-3 bg-slate-50 rounded-lg">
+                    <!-- 速度监控 -->
+                    <div class="grid grid-cols-2 gap-2 mb-4 p-3 bg-slate-50 rounded-lg border border-slate-100">
                         <div class="text-center border-r border-slate-200">
-                            <div class="text-[10px] text-slate-500 uppercase font-bold">下载速度</div>
-                            <div class="text-sm font-mono text-blue-600">${formatSpeed(disk.download_speed || 0)}</div>
+                            <div class="text-[10px] text-slate-400 uppercase font-bold tracking-wider">下载速度</div>
+                            <div class="text-sm font-mono font-bold text-blue-600">${formatSpeed(disk.download_speed || 0)}</div>
                             <div class="text-[9px] text-slate-400 mt-1">
-                                <i class="fas fa-tachometer-alt mr-1"></i>限速: ${disk.config.download_limit_kb > 0 ? disk.config.download_limit_kb + ' KB/s' : '无限制'}
+                                <i class="fas fa-arrow-down mr-1"></i>限速: ${disk.config.download_limit_kb > 0 ? disk.config.download_limit_kb + ' KB/s' : '无'}
                             </div>
                         </div>
                         <div class="text-center">
-                            <div class="text-[10px] text-slate-500 uppercase font-bold">上传速度</div>
-                            <div class="text-sm font-mono text-green-600">${formatSpeed(disk.upload_speed || 0)}</div>
+                            <div class="text-[10px] text-slate-400 uppercase font-bold tracking-wider">上传速度</div>
+                            <div class="text-sm font-mono font-bold text-green-600">${formatSpeed(disk.upload_speed || 0)}</div>
                             <div class="text-[9px] text-slate-400 mt-1">
-                                <i class="fas fa-tachometer-alt mr-1"></i>限速: ${disk.config.upload_limit_kb > 0 ? disk.config.upload_limit_kb + ' KB/s' : '无限制'}
+                                <i class="fas fa-arrow-up mr-1"></i>限速: ${disk.config.upload_limit_kb > 0 ? disk.config.upload_limit_kb + ' KB/s' : '无'}
                             </div>
                         </div>
                     </div>
 
-                    <div class="disk-info">驱动模式: ${disk.config.driver_mode === 'nbd' ? '<span class="text-blue-600 font-bold">NBD</span> (高性能)' : '<span class="text-amber-600 font-bold">FUSE</span> (兼容性)'}</div>
-                    <div class="disk-info">容量: ${disk.config.disk_size_gb} GB</div>
-                    <div class="disk-info">云端分块大小: <span class="text-slate-700 font-bold">${disk.config.block_size_mb} MB</span></div>
-                    <div class="disk-info">FUSE挂载: ${disk.config.mount_path}</div>
-                    <div class="disk-info">并发同步: ${disk.config.concurrency || 5} 线程</div>
-                    <div class="disk-info">系统挂载: ${disk.final_mountpoint} (${disk.loop_status === 'mounted' ? '已挂载' : '未挂载'})</div>
-                    <div class="disk-info">Inode 比例: <span class="text-slate-700 font-bold">${(disk.config.inode_ratio || 4194304) >= 1048576 ? (disk.config.inode_ratio / 1024 / 1024) + ' MB' : (disk.config.inode_ratio / 1024) + ' KB'}</span></div>
-                    <div class="disk-info">压缩算法: <span class="text-slate-700 font-bold">${(disk.config.compression || 'none') === 'none' ? '不压缩' : disk.config.compression.toUpperCase()}</span></div>
-                    <div class="disk-info">本地缓存: ${cacheMB} MB / ${disk.config.max_cache_gb} GB</div>
-                    <div class="disk-info">分块进度: <span class="text-slate-700 font-bold">${disk.uploaded_blocks || 0}</span> / ${disk.total_blocks || 0} 块</div>
-                    <div class="disk-info">正在下载: ${disk.download_queue_size || 0} 块</div>
-                    <div class="disk-info">待上传: ${disk.upload_queue_size} 块</div>
+                    <!-- 存储与同步 -->
+                    <div class="mb-4">
+                        <div class="text-[11px] font-bold text-slate-500 mb-2 flex items-center">
+                            <i class="fas fa-cloud-upload-alt mr-2 text-blue-500"></i>存储与同步
+                        </div>
+                        <div class="grid grid-cols-1 gap-1 pl-5 border-l-2 border-blue-100">
+                            <div class="disk-info">磁盘容量: <span class="font-medium text-slate-700">${disk.config.disk_size_gb} GB</span></div>
+                            <div class="disk-info">已存数据: <span class="font-bold text-green-600">${formatBytes(disk.stored_size_bytes)}</span></div>
+                            <div class="disk-info">同步进度: <span class="font-bold text-slate-700">${disk.uploaded_blocks || 0}</span> / ${disk.total_blocks || 0} 块</div>
+                            <div class="disk-info">文件数量: <span class="font-bold text-slate-700">${disk.used_inodes || 0}</span> / ${disk.total_inodes || 0} (Inode)</div>
+                        </div>
+                    </div>
+
+                    <!-- 性能与缓存 -->
+                    <div class="mb-4">
+                        <div class="text-[11px] font-bold text-slate-500 mb-2 flex items-center">
+                            <i class="fas fa-bolt mr-2 text-amber-500"></i>性能与缓存
+                        </div>
+                        <div class="grid grid-cols-1 gap-1 pl-5 border-l-2 border-amber-100">
+                            <div class="disk-info">本地缓存: <span class="font-medium text-slate-700">${cacheMB} MB</span> / ${disk.config.max_cache_gb} GB</div>
+                            <div class="disk-info">并发线程: <span class="font-medium text-slate-700">${disk.config.concurrency || 5} 线程</span></div>
+                            <div class="disk-info">压缩算法: <span class="font-medium text-slate-700">${(disk.config.compression || 'none') === 'none' ? '不压缩' : disk.config.compression.toUpperCase()}</span></div>
+                            <div class="disk-info">Inode 比例: <span class="font-medium text-slate-700">${(disk.config.inode_ratio || 4194304) >= 1048576 ? (disk.config.inode_ratio / 1024 / 1024) + ' MB' : (disk.config.inode_ratio / 1024) + ' KB'} / Inode</span></div>
+                        </div>
+                    </div>
+
+                    <!-- 系统详情 -->
+                    <div class="mb-4">
+                        <div class="text-[11px] font-bold text-slate-500 mb-2 flex items-center">
+                            <i class="fas fa-info-circle mr-2 text-slate-400"></i>系统详情
+                        </div>
+                        <div class="grid grid-cols-1 gap-1 pl-5 border-l-2 border-slate-200 text-[11px]">
+                            <div class="disk-info">驱动模式: ${disk.config.driver_mode === 'nbd' ? '<span class="text-blue-600 font-bold">NBD</span> (高性能)' : '<span class="text-amber-600 font-bold">FUSE</span> (兼容性)'}</div>
+                            <div class="disk-info">云端分块: <span class="text-slate-600">${disk.config.block_size_mb} MB</span></div>
+                            <div class="disk-info text-truncate" title="${disk.config.mount_path}">映射路径: <span class="text-slate-500 font-mono">${disk.config.mount_path}</span></div>
+                            <div class="disk-info text-truncate" title="${disk.final_mountpoint}">挂载点: <span class="text-slate-500 font-mono">${disk.final_mountpoint}</span> <span class="text-[10px] ml-1 ${disk.loop_status === 'mounted' ? 'text-green-500' : 'text-slate-400'}">(${disk.loop_status === 'mounted' ? '已挂载' : '未挂载'})</span></div>
+                        </div>
+                    </div>
+
+                    <!-- 队列状态 (仅运行时显示) -->
+                    ${disk.status === 'running' ? `
+                    <div class="flex gap-4 mb-4 px-3 py-2 bg-slate-50 rounded border border-dashed border-slate-200">
+                        <div class="text-[11px] text-slate-500">正在下载: <span class="font-bold text-blue-600">${disk.download_queue_size || 0}</span></div>
+                        <div class="text-[11px] text-slate-500">待上传: <span class="font-bold text-green-600">${disk.upload_queue_size || 0}</span></div>
+                    </div>
+                    ` : ''}
                     
-                    ${disk.error_msg ? `<div class="p-2 mt-2 bg-red-50 text-red-600 text-xs rounded border border-red-100">${disk.error_msg}</div>` : ''}
+                    ${disk.error_msg ? `<div class="p-2 mb-4 bg-red-50 text-red-600 text-[11px] rounded border border-red-100 break-words"><i class="fas fa-exclamation-triangle mr-1"></i>${disk.error_msg}</div>` : ''}
                     
-                    <div class="disk-actions">
+                    <div class="disk-actions mt-auto pt-2 border-t border-slate-100">
                         ${disk.status === 'running' ? 
-                            `<button onclick="unmountDisk('${disk.disk_name}')" class="bg-slate-500 text-white px-3 py-1 rounded text-sm hover:bg-slate-600 transition">卸载</button>` :
-                            `<button onclick="mountDisk('${disk.disk_name}')" class="bg-blue-600 text-white px-3 py-1 rounded text-sm hover:bg-blue-700 transition" ${disk.status === 'starting' ? 'disabled style="opacity:0.5; cursor:not-allowed;"' : ''}>${disk.status === 'starting' ? '启动中' : '启动'}</button>`
+                            `<button onclick="unmountDisk('${disk.disk_name}')" class="bg-slate-500 text-white px-3 py-1.5 rounded text-sm hover:bg-slate-600 transition flex-1">卸载</button>` :
+                            `<button onclick="mountDisk('${disk.disk_name}')" class="bg-blue-600 text-white px-3 py-1.5 rounded text-sm hover:bg-blue-700 transition flex-1" ${disk.status === 'starting' ? 'disabled style="opacity:0.5; cursor:not-allowed;"' : ''}>${disk.status === 'starting' ? '启动中' : '启动'}</button>`
                         }
-                        <button onclick="editDisk('${disk.disk_name}')" class="border border-slate-200 px-3 py-1 rounded text-sm hover:bg-slate-50 transition">配置</button>
-                        <button onclick="deleteDisk('${disk.disk_name}')" class="bg-red-500 text-white px-3 py-1 rounded text-sm hover:bg-red-600 transition">删除</button>
+                        <button onclick="editDisk('${disk.disk_name}')" class="border border-slate-200 px-3 py-1.5 rounded text-sm hover:bg-slate-50 transition">配置</button>
+                        <button onclick="deleteDisk('${disk.disk_name}')" class="bg-red-500 text-white px-3 py-1.5 rounded text-sm hover:bg-red-600 transition">删除</button>
                     </div>
                 `;
                 container.appendChild(card);
