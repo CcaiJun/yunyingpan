@@ -164,7 +164,7 @@ func HandleEvict(w http.ResponseWriter, r *http.Request) {
 
 ### 7.2 核心功能页面
 
-#### A. 仪表盘 (Dashboard)
+#### A. 磁盘列表 (Disk List)
 - **状态概览**:
   - 服务运行状态 (Running/Stopped)。
   - 当前挂载点路径。

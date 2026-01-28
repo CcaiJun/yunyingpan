@@ -277,6 +277,23 @@ async def startup_event():
                 check_cache = (now - last_cache_check) > 30 # 每30秒检查一次缓存大小，而不是每5秒
                 
                 for name, instance in disks.items():
+                    # 4. 更新上传队列大小
+                    bm = None
+                    if instance.config.driver_mode == "fuse":
+                        if instance.vdrive:
+                            bm = instance.vdrive.bm
+                    else:
+                        bm = instance.vdrive # NBD 模式下 instance.vdrive 直接是 BlockManager
+                    
+                    if bm:
+                        with bm.upload_lock:
+                            queue_size = len(bm.upload_queue)
+                        with bm.uploading_lock:
+                            uploading_size = bm.uploading_count
+                        instance.upload_queue_size = queue_size + uploading_size
+                    else:
+                        instance.upload_queue_size = 0
+
                     # 2. 计算缓存大小 (优化：降低频率)
                     if check_cache:
                         total_size = 0
@@ -305,7 +322,6 @@ async def startup_event():
                         instance.cache_usage_bytes = total_size
                     
                     # 3. 检测挂载状态
-                    import re
                     # 优化正则匹配，减少开销
                     is_loop_mounted = f" {instance.final_mountpoint} " in mounts_output or mounts_output.endswith(f" {instance.final_mountpoint}")
                     is_fuse_mounted_in_list = f" {instance.config.mount_path} " in mounts_output or mounts_output.endswith(f" {instance.config.mount_path}")
@@ -343,16 +359,6 @@ async def startup_event():
                             instance.loop_status = "unmounted"
                             if instance.status == "running":
                                 instance.status = "stopped"
-                    
-                    # 4. 更新上传队列大小
-                    if instance.vdrive:
-                        with instance.vdrive.upload_lock:
-                            queue_size = len(instance.vdrive.upload_queue)
-                        with instance.vdrive.uploading_lock:
-                            uploading_size = instance.vdrive.uploading_count
-                        instance.upload_queue_size = queue_size + uploading_size
-                    else:
-                        instance.upload_queue_size = 0
                 
                 if check_cache:
                     last_cache_check = now
