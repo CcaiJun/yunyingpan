@@ -1,53 +1,68 @@
 #!/bin/bash
 
-# Yingpan (Virtual WebDAV Disk) Deployment Script
-# This script automates the setup of the Yingpan backend.
+# Yingpan (虚拟 WebDAV 磁盘) 部署脚本
+# 此脚本用于自动化安装和配置 Yingpan 后端。
 
-# 1. Check for root privileges and location
+# 1. 检查 root 权限和运行位置
 if [ "$EUID" -ne 0 ]; then
-  echo "Please run as root (use sudo)."
+  echo "请以 root 权限运行（使用 sudo）。"
   exit 1
 fi
 
 if [ ! -f "server.py" ]; then
-  echo "Error: server.py not found in current directory."
-  echo "Please run this script from the application folder."
+  echo "错误：当前目录下未找到 server.py。"
+  echo "请在应用根目录下运行此脚本。"
   exit 1
 fi
 
-# Check if FUSE kernel module is loaded
-if ! lsmod | grep -q fuse; then
-  echo "Loading fuse kernel module..."
-  modprobe fuse || echo "Warning: Could not load fuse module. FUSE may not work."
+echo "--- 开始部署 Yingpan ---"
+
+# 2. 检查端口占用
+if lsof -Pi :8001 -sTCP:LISTEN -t >/dev/null ; then
+    echo "警告：端口 8001 已被占用。如果 Yingpan 已经在运行，脚本将继续尝试更新。"
 fi
 
-echo "--- Starting Yingpan Deployment ---"
-
-# 2. Update and install system dependencies
-echo "Installing system dependencies..."
+# 3. 更新并安装系统依赖
+echo "正在安装系统依赖..."
 apt-get update
-apt-get install -y python3 python3-pip python3-venv fuse3 e2fsprogs jq lsof psmisc
+apt-get install -y python3 python3-pip python3-venv fuse3 e2fsprogs jq lsof psmisc nbd-client
 
-# 3. Create necessary directories
-echo "Creating system directories..."
+# 4. 加载内核模块
+echo "正在加载内核模块 (FUSE & NBD)..."
+modprobe fuse || echo "警告：无法加载 fuse 模块。"
+# 尝试加载 nbd 模块，并设置较大的设备数量
+if ! lsmod | grep -q "^nbd"; then
+    modprobe nbd nbds_max=128 || echo "警告：无法加载 nbd 模块。"
+fi
+
+# 5. 配置 FUSE
+if [ -f /etc/fuse.conf ]; then
+    if ! grep -q "^user_allow_other" /etc/fuse.conf; then
+        echo "正在 /etc/fuse.conf 中启用 user_allow_other..."
+        sed -i 's/#user_allow_other/user_allow_other/' /etc/fuse.conf
+    fi
+fi
+
+# 6. 创建必要目录
+echo "正在创建系统目录..."
 mkdir -p /mnt/v_disks
 mkdir -p /var/cache/v_drive
 chmod 777 /var/cache/v_drive
 
-# 4. Set up Python virtual environment
-echo "Setting up Python virtual environment..."
+# 7. 设置 Python 虚拟环境
+echo "正在设置 Python 虚拟环境..."
 if [ ! -d "venv" ]; then
   python3 -m venv venv
 fi
 source venv/bin/activate
 
-# 5. Install Python dependencies
-echo "Installing Python dependencies..."
+# 8. 安装 Python 依赖
+echo "正在安装 Python 依赖..."
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# 6. Create systemd service file
-echo "Creating systemd service..."
+# 9. 创建 systemd 服务文件
+echo "正在创建 systemd 服务..."
 WORKING_DIR=$(pwd)
 SERVICE_FILE="/etc/systemd/system/yingpan.service"
 
@@ -63,6 +78,7 @@ WorkingDirectory=$WORKING_DIR
 ExecStart=$WORKING_DIR/venv/bin/python3 server.py
 Restart=always
 RestartSec=5
+LimitNOFILE=65536
 StandardOutput=append:$WORKING_DIR/server.log
 StandardError=append:$WORKING_DIR/server.log
 
@@ -70,19 +86,19 @@ StandardError=append:$WORKING_DIR/server.log
 WantedBy=multi-user.target
 EOF
 
-# 7. Reload systemd and start service
-echo "Starting Yingpan service..."
+# 10. 重新加载 systemd 并启动服务
+echo "正在启动 Yingpan 服务..."
 systemctl daemon-reload
 systemctl enable yingpan
 systemctl restart yingpan
 
-echo "--- Deployment Complete ---"
-echo "Service status:"
+echo "--- 部署完成 ---"
+echo "服务状态："
 systemctl status yingpan --no-pager
 
 echo ""
-echo "Dashboard is available at: http://localhost:8001"
-echo "Log file: $WORKING_DIR/server.log"
-echo "Use 'systemctl stop yingpan' to stop the service."
-echo "Use 'systemctl start yingpan' to start the service."
-echo "Use 'systemctl restart yingpan' to restart the service."
+echo "管理控制台地址: http://localhost:8001"
+echo "日志文件路径: $WORKING_DIR/server.log"
+echo "使用 'systemctl stop yingpan' 停止服务。"
+echo "使用 'systemctl start yingpan' 启动服务。"
+echo "使用 'systemctl restart yingpan' 重启服务。"
