@@ -144,6 +144,8 @@ class BlockManager:
         if self.compression == "zstd":
             self.cctx = zstd.ZstdCompressor(level=3)
             self.dctx = zstd.ZstdDecompressor()
+            self.cctx_lock = threading.Lock()
+            self.dctx_lock = threading.Lock()
         
         # 速率限制器
         self.upload_limiter = RateLimiter(upload_limit_kb)
@@ -294,7 +296,8 @@ class BlockManager:
                                             raw_data = f.read()
                                         
                                         if self.compression == "zstd":
-                                            processed_data = self.cctx.compress(raw_data)
+                                            with self.cctx_lock:
+                                                processed_data = self.cctx.compress(raw_data)
                                         elif self.compression == "lz4":
                                             processed_data = lz4.frame.compress(raw_data)
                                         
@@ -377,7 +380,8 @@ class BlockManager:
                             compressed_data = data_stream.getvalue()
                             
                             if self.compression == "zstd":
-                                raw_data = self.dctx.decompress(compressed_data)
+                                with self.dctx_lock:
+                                    raw_data = self.dctx.decompress(compressed_data)
                             elif self.compression == "lz4":
                                 raw_data = lz4.frame.decompress(compressed_data)
                             else:
@@ -447,7 +451,8 @@ class BlockManager:
                             compressed_data = data_stream.getvalue()
                             
                             if self.compression == "zstd":
-                                raw_data = self.dctx.decompress(compressed_data)
+                                with self.dctx_lock:
+                                    raw_data = self.dctx.decompress(compressed_data)
                             elif self.compression == "lz4":
                                 raw_data = lz4.frame.decompress(compressed_data)
                             else:
