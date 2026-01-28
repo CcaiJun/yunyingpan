@@ -536,6 +536,7 @@
                         </div>
                     </div>
 
+                    <div class="disk-info">驱动模式: ${disk.config.driver_mode === 'nbd' ? '<span class="text-blue-600 font-bold">NBD</span> (高性能)' : '<span class="text-amber-600 font-bold">FUSE</span> (兼容性)'}</div>
                     <div class="disk-info">容量: ${disk.config.disk_size_gb} GB</div>
                     <div class="disk-info">FUSE挂载: ${disk.config.mount_path}</div>
                     <div class="disk-info">并发同步: ${disk.config.concurrency || 5} 线程</div>
