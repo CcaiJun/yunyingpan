@@ -158,6 +158,20 @@
                             <label class="block text-sm font-medium text-slate-700 mb-2">最大缓存空间 (GB)</label>
                             <input type="number" id="max_cache_gb" value="10" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                         </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">Inode 比例 (字节/Inode)</label>
+                            <select id="inode_ratio" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                <option value="4096">4 KB (极多小文件)</option>
+                                <option value="16384">16 KB</option>
+                                <option value="65536">64 KB</option>
+                                <option value="262144">256 KB</option>
+                                <option value="1048576">1 MB (大文件)</option>
+                                <option value="4194304" selected>4 MB (默认-极快启动)</option>
+                                <option value="16777216">16 MB (超大文件)</option>
+                                <option value="67108864">64 MB (蓝光/视频专用)</option>
+                            </select>
+                            <p class="text-[10px] text-slate-500 mt-1">比例越大，启动和格式化越快，但能存的文件数越少。</p>
+                        </div>
                         <div class="md:col-span-2">
                             <label class="block text-sm font-medium text-slate-700 mb-2">WebDAV 保存路径</label>
                             <input type="text" id="remote_path" value="v_disks/data_disk" placeholder="例如: /backups/disks" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
@@ -259,7 +273,8 @@
                 block_size_mb: parseInt(document.getElementById('block_size_mb').value),
                 disk_size_gb: parseInt(document.getElementById('disk_size_gb').value),
                 max_cache_gb: parseInt(document.getElementById('max_cache_gb').value),
-                concurrency: parseInt(document.getElementById('concurrency').value)
+                concurrency: parseInt(document.getElementById('concurrency').value),
+                inode_ratio: parseInt(document.getElementById('inode_ratio').value)
             };
             localStorage.setItem('v_drive_config', JSON.stringify(config));
             
@@ -426,9 +441,10 @@
                          document.getElementById('disk_size_gb').value = disk.config.disk_size_gb;
                          document.getElementById('max_cache_gb').value = disk.config.max_cache_gb;
                          document.getElementById('concurrency').value = disk.config.concurrency || 5;
+                         document.getElementById('inode_ratio').value = disk.config.inode_ratio || 4194304;
                          
                          // 锁定不可更改的属性
-                         const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb'];
+                         const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb', 'inode_ratio'];
                          lockedFields.forEach(id => {
                              const el = document.getElementById(id);
                              if (el) {
@@ -449,7 +465,7 @@
 
          function resetSettingsForm() {
              // 重置表单并解锁字段
-             const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb'];
+             const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb', 'inode_ratio'];
              lockedFields.forEach(id => {
                  const el = document.getElementById(id);
                  if (el) {

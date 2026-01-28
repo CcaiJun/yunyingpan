@@ -41,6 +41,7 @@ class MountConfig(BaseModel):
     block_size_mb: int = 4
     remote_path: str = "blocks"
     concurrency: int = 5
+    inode_ratio: int = 4194304  # 默认 4MB (对应 largefile4)
 
 class DiskInstance:
     def __init__(self, config: MountConfig):
@@ -158,10 +159,11 @@ def do_mount(inst: DiskInstance):
             logger.error(f"Error during format check: {e}")
 
         if needs_format:
-            logger.info(f"Formatting disk {cfg.disk_name}...")
+            logger.info(f"Formatting disk {cfg.disk_name} with Inode ratio {cfg.inode_ratio}...")
             # 增加 -O ^metadata_csum 以提高与某些内核的兼容性，并减少元数据开销
             try:
-                subprocess.run(['mkfs.ext4', '-F', '-T', 'largefile4', '-b', '4096', 
+                # 使用用户指定的 inode_ratio (-i)
+                subprocess.run(['mkfs.ext4', '-F', '-i', str(cfg.inode_ratio), '-b', '4096', 
                               '-O', '^metadata_csum',
                               '-E', 'lazy_itable_init=1,lazy_journal_init=1', img_path], check=True)
             except subprocess.CalledProcessError as e:
@@ -368,6 +370,7 @@ async def mount_drive(config: MountConfig):
         if old.remote_path != config.remote_path: locked_changes.append("远程路径")
         if old.block_size_mb != config.block_size_mb: locked_changes.append("分块大小")
         if old.disk_size_gb != config.disk_size_gb: locked_changes.append("磁盘容量")
+        if old.inode_ratio != config.inode_ratio: locked_changes.append("Inode 比例")
         
         if locked_changes:
             raise HTTPException(status_code=400, detail=f"禁止修改关键属性: {', '.join(locked_changes)}。修改这些属性会导致现有数据损坏。")
