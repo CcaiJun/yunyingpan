@@ -17,11 +17,11 @@ logger = logging.getLogger(__name__)
 class VDrive(Operations):
     def __init__(self, dav_url, dav_user, dav_password, cache_dir, disk_size_gb, max_cache_size_gb, 
                  block_size_mb=4, img_name="virtual_disk.img", remote_path="blocks", concurrency=4,
-                 compression="none", upload_limit_kb=0, download_limit_kb=0):
+                 compression="none", compression_level=3, upload_limit_kb=0, download_limit_kb=0):
         self.img_name = img_name if img_name.endswith('.img') else f"{img_name}.img"
         self.bm = BlockManager(dav_url, dav_user, dav_password, cache_dir, disk_size_gb, 
                               max_cache_size_gb, block_size_mb, img_name, remote_path, concurrency,
-                              compression, upload_limit_kb, download_limit_kb)
+                              compression, compression_level, upload_limit_kb, download_limit_kb)
         self.disk_size = self.bm.disk_size
         
     def getattr(self, path, fh=None):

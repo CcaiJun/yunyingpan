@@ -210,12 +210,17 @@
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-slate-700 mb-2">压缩算法 (Compression)</label>
-                            <select id="compression" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            <select id="compression" onchange="updateCompressionLevelUI()" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                                 <option value="none">不压缩 (最高性能)</option>
                                 <option value="zstd" selected>Zstd (推荐-兼顾压缩率与速度)</option>
                                 <option value="lz4">LZ4 (极速-适合弱CPU环境)</option>
                             </select>
                             <p class="text-[10px] text-slate-500 mt-1">开启压缩可显著减少云端占用和上传流量。</p>
+                        </div>
+                        <div id="compression_level_div">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">压缩级别 (Level)</label>
+                            <input type="number" id="compression_level" value="3" min="1" max="22" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            <p id="compression_level_hint" class="text-[10px] text-slate-500 mt-1">Zstd 建议 1-22，默认 3。级别越高压缩率越高但 CPU 占用越大。</p>
                         </div>
                         <div class="md:col-span-2">
                             <label class="block text-sm font-medium text-slate-700 mb-2">WebDAV 保存路径</label>
@@ -344,6 +349,10 @@
                                 <option value="lz4">LZ4 (极速-适合弱CPU环境)</option>
                             </select>
                         </div>
+                        <div id="edit_compression_level_div">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">压缩级别 (Level)</label>
+                            <input type="number" id="edit_compression_level" disabled class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed outline-none" title="磁盘创建后，此项不可修改">
+                        </div>
                         <div class="md:col-span-2">
                             <label class="block text-sm font-medium text-slate-700 mb-2">WebDAV 保存路径</label>
                             <input type="text" id="edit_remote_path" disabled class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed outline-none" title="磁盘创建后，此项不可修改">
@@ -381,6 +390,7 @@
             if (tabId === 'settings') {
                 // 手动点击导航栏进入设置，重置表单为创建模式
                 resetSettingsForm();
+                updateCompressionLevelUI();
             }
             // Hide all contents
             document.querySelectorAll('.tab-content').forEach(tab => {
@@ -394,6 +404,30 @@
                 link.classList.remove('bg-slate-800', 'text-blue-400');
             });
             document.getElementById('nav-' + tabId).classList.add('bg-slate-800', 'text-blue-400');
+        }
+
+        function updateCompressionLevelUI() {
+            const algo = document.getElementById('compression').value;
+            const levelDiv = document.getElementById('compression_level_div');
+            const levelInput = document.getElementById('compression_level');
+            const hint = document.getElementById('compression_level_hint');
+
+            if (algo === 'none') {
+                levelDiv.classList.add('hidden');
+            } else {
+                levelDiv.classList.remove('hidden');
+                if (algo === 'zstd') {
+                    levelInput.min = 1;
+                    levelInput.max = 22;
+                    if (levelInput.value > 22 || levelInput.value < 1) levelInput.value = 3;
+                    hint.textContent = "Zstd 建议 1-22，默认 3。级别越高压缩率越高但 CPU 占用越大。";
+                } else if (algo === 'lz4') {
+                    levelInput.min = 0;
+                    levelInput.max = 16;
+                    if (levelInput.value > 16 || levelInput.value < 0) levelInput.value = 0;
+                    hint.textContent = "LZ4 建议 0-16，默认 0。级别越高压缩率越高但速度越慢。";
+                }
+            }
         }
 
         // 整合后，API 就在同一个端口上，直接使用相对路径
@@ -416,6 +450,7 @@
                 concurrency: parseInt(document.getElementById('concurrency').value),
                 inode_ratio: parseInt(document.getElementById('inode_ratio').value),
                 compression: document.getElementById('compression').value,
+                compression_level: parseInt(document.getElementById('compression_level').value || 3),
                 driver_mode: document.getElementById('driver_mode').value,
                 read_only: document.getElementById('read-only').checked
             };
@@ -585,7 +620,7 @@
                         <div class="grid grid-cols-1 gap-1 pl-5 border-l-2 border-amber-100">
                             <div class="disk-info">本地缓存: <span class="font-medium text-slate-700">${cacheMB} MB</span> / ${disk.config.max_cache_gb} GB</div>
                             <div class="disk-info">并发线程: <span class="font-medium text-slate-700">${disk.config.concurrency || 5} 线程</span></div>
-                            <div class="disk-info">压缩算法: <span class="font-medium text-slate-700">${(disk.config.compression || 'none') === 'none' ? '不压缩' : disk.config.compression.toUpperCase()}</span></div>
+                            <div class="disk-info">压缩算法: <span class="font-medium text-slate-700">${(disk.config.compression || 'none') === 'none' ? '不压缩' : disk.config.compression.toUpperCase() + ' (Level ' + (disk.config.compression_level || 3) + ')'}</span></div>
                             <div class="disk-info">Inode 比例: <span class="font-medium text-slate-700">${(disk.config.inode_ratio || 4194304) >= 1048576 ? (disk.config.inode_ratio / 1024 / 1024) + ' MB' : (disk.config.inode_ratio / 1024) + ' KB'} / Inode</span></div>
                         </div>
                     </div>
@@ -667,6 +702,7 @@
                           document.getElementById('edit_concurrency').value = disk.config.concurrency || 5;
                           document.getElementById('edit_inode_ratio').value = disk.config.inode_ratio || 4194304;
                           document.getElementById('edit_compression').value = disk.config.compression || "none";
+                          document.getElementById('edit_compression_level').value = disk.config.compression_level || 3;
                           document.getElementById('edit_driver_mode').value = disk.config.driver_mode || "fuse";
                           document.getElementById('edit_read_only').checked = disk.config.read_only || false;
                           
@@ -706,6 +742,7 @@
                   concurrency: parseInt(document.getElementById('edit_concurrency').value),
                   inode_ratio: parseInt(document.getElementById('edit_inode_ratio').value),
                   compression: document.getElementById('edit_compression').value,
+                  compression_level: parseInt(document.getElementById('edit_compression_level').value || 3),
                   driver_mode: document.getElementById('edit_driver_mode').value,
                   read_only: document.getElementById('edit_read_only').checked
               };
@@ -727,7 +764,7 @@
 
          function resetSettingsForm() {
             // 重置表单并解锁字段
-            const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb', 'inode_ratio', 'compression', 'driver_mode'];
+            const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb', 'inode_ratio', 'compression', 'compression_level', 'driver_mode'];
             lockedFields.forEach(id => {
                  const el = document.getElementById(id);
                  if (el) {
@@ -792,6 +829,11 @@
                 if (config.disk_size_gb) document.getElementById('disk_size_gb').value = config.disk_size_gb;
                 if (config.max_cache_gb) document.getElementById('max_cache_gb').value = config.max_cache_gb;
                 if (config.concurrency) document.getElementById('concurrency').value = config.concurrency;
+                if (config.compression) {
+                    document.getElementById('compression').value = config.compression;
+                    updateCompressionLevelUI();
+                }
+                if (config.compression_level) document.getElementById('compression_level').value = config.compression_level;
             }
         }
 

@@ -123,7 +123,7 @@ class MetadataDB:
 class BlockManager:
     def __init__(self, dav_url, dav_user, dav_password, cache_dir, disk_size_gb, max_cache_size_gb, 
                  block_size_mb=4, img_name="virtual_disk.img", remote_path="blocks", concurrency=4,
-                 compression="none", upload_limit_kb=0, download_limit_kb=0):
+                 compression="none", compression_level=3, upload_limit_kb=0, download_limit_kb=0):
         self.use_remote = bool(dav_url and dav_url.strip())
         if self.use_remote:
             limits = Limits(max_connections=concurrency * 2, max_keepalive_connections=concurrency)
@@ -144,10 +144,11 @@ class BlockManager:
         self.remote_path = remote_path.strip('/')
         self.concurrency = concurrency
         self.compression = compression
+        self.compression_level = compression_level
         
         # 速率限制器压缩器初始化
         if self.compression == "zstd":
-            self.cctx = zstd.ZstdCompressor(level=3)
+            self.cctx = zstd.ZstdCompressor(level=self.compression_level)
             self.dctx = zstd.ZstdDecompressor()
             self.cctx_lock = threading.Lock()
             self.dctx_lock = threading.Lock()
@@ -305,7 +306,7 @@ class BlockManager:
                                             with self.cctx_lock:
                                                 processed_data = self.cctx.compress(raw_data)
                                         elif self.compression == "lz4":
-                                            processed_data = lz4.frame.compress(raw_data)
+                                            processed_data = lz4.frame.compress(raw_data, compression_level=self.compression_level)
                                         
                                         # 上传内存中的压缩数据
                                         import io
