@@ -581,8 +581,16 @@ async def list_webdav_computers(req: Request):
             
         # 列出 v_disks 下的所有目录
         items = client.ls("v_disks", detail=True)
-        # 过滤出目录，并提取名称
-        computers = [item['name'].strip('/') for item in items if item['type'] == 'directory']
+        # 过滤出目录，并提取名称（只取最后一部分，防止某些 WebDAV 返回全路径）
+        computers = []
+        for item in items:
+            if item['type'] == 'directory':
+                full_name = item['name'].strip('/')
+                base_name = full_name.split('/')[-1]
+                if base_name:
+                    computers.append(base_name)
+        
+        logger.info(f"WebDAV computers found: {computers}")
         return computers
     except Exception as e:
         logger.error(f"WebDAV list failed: {e}")
@@ -611,9 +619,13 @@ async def list_webdav_disks(req: Request):
         disks_info = []
         for item in items:
             if item['type'] == 'directory':
-                name = item['name'].strip('/')
-                has_config = client.exists(f"{path}/{name}/config.json")
-                disks_info.append({"name": name, "has_config": has_config})
+                full_name = item['name'].strip('/')
+                disk_name = full_name.split('/')[-1]
+                if disk_name:
+                    has_config = client.exists(f"{path}/{disk_name}/config.json")
+                    disks_info.append({"name": disk_name, "has_config": has_config})
+        
+        logger.info(f"WebDAV disks found for {computer_name}: {disks_info}")
         return disks_info
     except Exception as e:
         logger.error(f"WebDAV list disks failed: {e}")
