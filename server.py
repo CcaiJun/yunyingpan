@@ -247,15 +247,37 @@ def do_mount(inst: DiskInstance):
 
         # 检查并格式化
         needs_format = True
+        
+        # 增加逻辑：如果远程已经有数据块，绝对不要格式化，否则会破坏原有数据
+        has_remote = False
+        try:
+            bm = None
+            if inst.config.driver_mode == "fuse":
+                bm = inst.vdrive.bm
+            else:
+                bm = inst.vdrive
+            if bm and bm.has_remote_data():
+                has_remote = True
+                logger.info(f"Disk {cfg.disk_name} has remote data, skipping auto-format to protect data.")
+        except Exception as e:
+            logger.warning(f"Failed to check remote data: {e}")
+
         try:
             res = subprocess.run(['blkid', target_path], capture_output=True, text=True)
-            if "TYPE=" in res.stdout: needs_format = False
+            if "TYPE=" in res.stdout: 
+                needs_format = False
+                logger.info(f"Disk {cfg.disk_name} already has a filesystem: {res.stdout.strip()}")
         except: pass
 
-        if needs_format:
+        if needs_format and not has_remote:
             logger.info(f"Formatting {target_path}...")
             subprocess.run(['mkfs.ext4', '-F', '-i', str(cfg.inode_ratio), '-b', '4096', 
                           '-O', '^metadata_csum', '-E', 'lazy_itable_init=1,lazy_journal_init=1', target_path], check=True)
+        elif needs_format and has_remote:
+            logger.error(f"Disk {cfg.disk_name} needs format but has remote data! Skipping format to prevent data loss. Please check if parameters (block size, compression) match the original disk.")
+            # 如果确实需要格式化但有远程数据，我们选择报错而不是自动格式化
+            # 这种情况通常是因为参数不匹配导致 blkid 读不出文件系统
+            raise Exception("无法识别文件系统，且检测到云端已有数据。请检查磁盘参数（分块大小、压缩算法等）是否与创建时一致。")
 
         # 最终挂载
         logger.info(f"Final mount: {' '.join(mount_cmd)}")

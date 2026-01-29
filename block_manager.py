@@ -97,6 +97,20 @@ class MetadataDB:
                 ''', (block_id, status, time.time()))
             conn.commit()
 
+    def batch_set_remote_exists(self, block_ids):
+        """批量更新远程存在标记，优化还原扫描性能"""
+        if not block_ids:
+            return
+        with sqlite3.connect(self.db_path) as conn:
+            now = time.time()
+            # 使用 executemany 进行批量插入/更新，并在一个事务中提交
+            conn.executemany('''
+                INSERT INTO blocks (block_id, status, remote_exists, last_access) 
+                VALUES (?, 'empty', 1, ?)
+                ON CONFLICT(block_id) DO UPDATE SET remote_exists=1, last_access=excluded.last_access
+            ''', [(bid, now) for bid in block_ids])
+            conn.commit()
+
     def get_block_info(self, block_id):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute('SELECT status, remote_exists FROM blocks WHERE block_id = ?', (block_id,))
@@ -194,6 +208,42 @@ class BlockManager:
         
         threading.Thread(target=self._cache_worker, daemon=True).start()
         threading.Thread(target=self._speed_worker, daemon=True).start()
+        
+        # 如果是新连接的磁盘（数据库中没有远程块记录），启动一个后台线程扫描远程已有的块
+        if self.use_remote and self.db.get_remote_exists_count() == 0:
+            threading.Thread(target=self._scan_remote_blocks, daemon=True).start()
+
+    def _scan_remote_blocks(self):
+        try:
+            logger.info(f"Scanning remote blocks for {self.img_name} in {self.remote_path}...")
+            # 1. 一次性获取远程文件列表 (WebDAV ls 通常是一个 PROPFIND 请求)
+            files = self.client.ls(self.remote_path, detail=False)
+            
+            remote_block_ids = []
+            for f in files:
+                filename = os.path.basename(f)
+                if filename.startswith("blk_") and filename.endswith(".dat"):
+                    try:
+                        block_id = int(filename[4:-4])
+                        remote_block_ids.append(block_id)
+                    except: continue
+            
+            if remote_block_ids:
+                # 2. 批量更新数据库 (单个事务)
+                self.db.batch_set_remote_exists(remote_block_ids)
+                logger.info(f"Scan complete: found and indexed {len(remote_block_ids)} existing remote blocks for {self.img_name}")
+                self._remote_dirs_checked = True 
+                
+                # 预热逻辑：主动触发前 2 个块的下载（通常包含文件系统超级块和根 Inode）
+                # 这会让挂载后的第一次 ls 变得飞快
+                for i in range(min(2, len(remote_block_ids))):
+                    bid = sorted(remote_block_ids)[i]
+                    if bid < 5: # 只预热最开头的几个元数据块
+                        threading.Thread(target=self.read, args=(self.block_size, bid * self.block_size), daemon=True).start()
+            else:
+                logger.info(f"Scan complete: no remote blocks found for {self.img_name}")
+        except Exception as e:
+            logger.error(f"Failed to scan remote blocks: {e}")
 
     def _speed_worker(self):
         while True:
@@ -238,6 +288,19 @@ class BlockManager:
                     if any(chunk): return False
             return True
         except: return False
+
+    def has_remote_data(self):
+        if not self.use_remote:
+            return False
+        try:
+            # 检查远程目录下是否存在任何 block 文件
+            files = self.client.ls(self.remote_path, detail=False)
+            for f in files:
+                if "blk_" in f:
+                    return True
+            return False
+        except:
+            return False
 
     def _upload_worker(self):
         while True:
