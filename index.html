@@ -472,12 +472,23 @@
         }
 
         let lastFetchSuccess = false;
+        let isFetching = false;
+        let fetchFailureCount = 0;
 
         async function fetchDisks() {
+            if (isFetching) return;
+            isFetching = true;
+
             try {
                 const url = `/disks?t=` + new Date().getTime();
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 10000);
+                const timeoutId = setTimeout(() => {
+                    try {
+                        controller.abort('timeout');
+                    } catch (e) {
+                        controller.abort();
+                    }
+                }, 10000);
 
                 const res = await fetch(url, {
                     cache: 'no-cache',
@@ -488,17 +499,28 @@
                 if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
                 const disks = await res.json();
                 renderDisks(disks);
+                
                 lastFetchSuccess = true;
+                fetchFailureCount = 0;
                 
                 // 成功后隐藏可能存在的错误提示
                 const errorEl = document.getElementById('backend-error');
                 if (errorEl) errorEl.classList.add('hidden');
             } catch (err) {
+                // 如果是 AbortError 且不是因为超时引起的，通常是浏览器行为，可以忽略
+                if (err.name === 'AbortError' && err.message !== 'timeout') {
+                    console.warn("Fetch aborted by browser/user:", err);
+                    return;
+                }
+
                 console.error("Fetch disks failed:", err);
+                fetchFailureCount++;
                 
-                // 只有在从未成功加载过数据，或者容器为空时才显示全屏错误
+                // 只有在连续失败超过 2 次时，或者从未成功加载过数据时才显示错误
                 const container = document.getElementById('diskList');
-                if (!lastFetchSuccess || container.innerHTML.trim() === '' || container.querySelector('.fa-exclamation-triangle')) {
+                const isCriticalError = !lastFetchSuccess || container.innerHTML.trim() === '' || container.querySelector('.fa-exclamation-triangle');
+                
+                if (isCriticalError) {
                     container.innerHTML = `
                         <div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #e74c3c;">
                             <i class="fas fa-exclamation-triangle fa-3x mb-3"></i>
@@ -509,11 +531,12 @@
                                 <button onclick="window.location.reload()" class="bg-blue-600 px-4 py-2 rounded text-white hover:bg-blue-700">刷新页面</button>
                             </div>
                         </div>`;
-                } else {
-                    // 如果已经有数据，只在顶部显示一个小的错误条，不打断用户操作
+                } else if (fetchFailureCount >= 2) {
+                    // 连续失败两次才显示顶部错误条
                     showTransientError(`连接后端失败: ${err.message}`);
-                    console.warn('Silent fetch error - keeping existing data');
                 }
+            } finally {
+                isFetching = false;
             }
         }
 
@@ -837,9 +860,13 @@
             }
         }
 
-        // 轮询更新状态
-        setInterval(fetchDisks, 2000);
-        fetchDisks();
+        // 轮询更新状态 (递归 setTimeout 替代 setInterval 以确保请求不重叠)
+        async function startPolling() {
+            await fetchDisks();
+            setTimeout(startPolling, 3000);
+        }
+        
+        startPolling();
         loadConfig();
     </script>
 </body>
