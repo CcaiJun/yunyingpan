@@ -863,11 +863,11 @@
                     
                     <div class="disk-actions mt-auto pt-2 border-t border-slate-100">
                         ${disk.status === 'running' ? 
-                            `<button onclick="unmountDisk('${disk.disk_name}')" class="bg-slate-500 text-white px-3 py-1.5 rounded text-sm hover:bg-slate-600 transition flex-1">卸载</button>` :
+                            `<button onclick="unmountDisk(event, '${disk.disk_name}')" class="bg-slate-500 text-white px-3 py-1.5 rounded text-sm hover:bg-slate-600 transition flex-1">卸载</button>` :
                             `<button onclick="mountDisk('${disk.disk_name}')" class="bg-blue-600 text-white px-3 py-1.5 rounded text-sm hover:bg-blue-700 transition flex-1" ${disk.status === 'starting' ? 'disabled style="opacity:0.5; cursor:not-allowed;"' : ''}>${disk.status === 'starting' ? '启动中' : '启动'}</button>`
                         }
                         <button onclick="editDisk('${disk.disk_name}')" class="border border-slate-200 px-3 py-1.5 rounded text-sm hover:bg-slate-50 transition">配置</button>
-                        <button onclick="deleteDisk('${disk.disk_name}')" class="bg-red-500 text-white px-3 py-1.5 rounded text-sm hover:bg-red-600 transition" ${disk.status === 'starting' ? 'disabled style="opacity:0.5; cursor:not-allowed;" title="启动中禁止删除硬盘"' : ''}>删除</button>
+                        <button onclick="deleteDisk(event, '${disk.disk_name}')" class="bg-red-500 text-white px-3 py-1.5 rounded text-sm hover:bg-red-600 transition" ${disk.status === 'starting' ? 'disabled style="opacity:0.5; cursor:not-allowed;" title="启动中禁止删除硬盘"' : ''}>删除</button>
                     </div>
                 `;
                 container.appendChild(card);
@@ -1017,8 +1017,14 @@
             }
          }
 
-        async function unmountDisk(name) {
-            if (!confirm(`确定要卸载磁盘 ${name} 吗？`)) return;
+        async function unmountDisk(event, name) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            
+            if (!window.confirm(`确定要卸载磁盘 ${name} 吗？`)) return;
+            
             try {
                 const res = await fetch(`${API_BASE}/unmount/${encodeURIComponent(name)}`, { method: 'POST' });
                 const data = await res.json();
@@ -1029,16 +1035,26 @@
             }
         }
 
-        async function deleteDisk(name) {
-            const deleteRemote = confirm(`确定要删除磁盘 "${name}" 吗？\n\n点击"确定"将清理本地配置和缓存。\n\n是否同时删除云端(WebDAV)上的数据文件？\n(取消则保留云端数据，确定则永久删除)`);
-            
-            // 弹出第二次确认以确保安全
-            let finalConfirm = true;
-            if (deleteRemote) {
-                finalConfirm = confirm("警告：您选择了同时删除云端文件！这将永久删除该硬盘在 WebDAV 上的所有数据块，不可恢复。确定继续吗？");
+        async function deleteDisk(event, name) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
             }
 
-            if (!finalConfirm) return;
+            // 第一步：确认是否删除磁盘
+            if (!window.confirm(`确定要删除磁盘 "${name}" 吗？\n\n此操作将清理本地配置和缓存。`)) {
+                return;
+            }
+
+            // 第二步：询问是否删除云端文件
+            const deleteRemote = window.confirm(`是否同时删除云端(WebDAV)上的数据文件？\n\n点击"确定"将永久删除云端数据，不可恢复。\n点击"取消"则仅删除本地配置，保留云端数据。`);
+            
+            // 如果选择了删除远程文件，再弹出一次警告
+            if (deleteRemote) {
+                if (!window.confirm("警告：您选择了同时删除云端文件！这将永久删除该硬盘在 WebDAV 上的所有数据块。确定继续吗？")) {
+                    return;
+                }
+            }
 
             try {
                 const res = await fetch(`${API_BASE}/disks/${encodeURIComponent(name)}?delete_remote=${deleteRemote}`, {

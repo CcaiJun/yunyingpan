@@ -48,19 +48,67 @@ class NBDServer:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.running = False
+        import uuid
+        self.server_id = str(uuid.uuid4())[:8]
 
     def start(self):
-        self.sock.bind((self.host, self.port))
-        self.sock.listen(5)
-        self.running = True
-        logger.info(f"NBD Server listening on {self.host}:{self.port}")
-        while self.running:
+        import time
+        bind_retries = 5
+        while bind_retries > 0:
             try:
-                conn, addr = self.sock.accept()
-                threading.Thread(target=self.handle_client, args=(conn,), daemon=True).start()
-            except Exception as e:
-                if self.running:
-                    logger.error(f"Error accepting connection: {e}")
+                # 每次重试都重新创建一个 socket，确保状态干净
+                if bind_retries < 5:
+                    try:
+                        self.sock.close()
+                    except:
+                        pass
+                    self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                
+                self.sock.bind((self.host, self.port))
+                break
+            except OSError as e:
+                if e.errno == 98: # Address already in use
+                    bind_retries -= 1
+                    if bind_retries > 0:
+                        logger.warning(f"Port {self.port} busy, retrying in 1s... ({bind_retries} retries left)")
+                        time.sleep(1)
+                        continue
+                logger.error(f"NBD server bind failed: {e}")
+                raise
+        
+        try:
+            self.sock.listen(5)
+            self.running = True
+            logger.info(f"NBD Server listening on {self.host}:{self.port}")
+            while self.running:
+                try:
+                    conn, addr = self.sock.accept()
+                    threading.Thread(target=self.handle_client, args=(conn,), daemon=True).start()
+                except Exception as e:
+                    if self.running:
+                        logger.error(f"Error accepting connection: {e}")
+        except Exception as e:
+            logger.error(f"NBD server start failed: {e}")
+            raise
+        finally:
+            self.running = False
+            try:
+                self.sock.close()
+            except:
+                pass
+
+    def stop(self):
+        self.running = False
+        try:
+            # 使用 shutdown 触发 accept() 退出
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except:
+            pass
+        try:
+            self.sock.close()
+        except:
+            pass
 
     def _recv_all(self, conn, n):
         data = b''

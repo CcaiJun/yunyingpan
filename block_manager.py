@@ -210,14 +210,27 @@ class BlockManager:
         threading.Thread(target=self._speed_worker, daemon=True).start()
         
         # 如果是新连接的磁盘（数据库中没有远程块记录），启动一个后台线程扫描远程已有的块
-        if self.use_remote and self.db.get_remote_exists_count() == 0:
-            threading.Thread(target=self._scan_remote_blocks, daemon=True).start()
+        if self.use_remote:
+            if self.db.get_remote_exists_count() > 0:
+                self._remote_dirs_checked = True
+                # 仍然可以在后台扫描一次，以防远程有更新，但不需要阻塞启动
+                threading.Thread(target=self._scan_remote_blocks, daemon=True).start()
+            else:
+                threading.Thread(target=self._scan_remote_blocks, daemon=True).start()
 
     def _scan_remote_blocks(self):
         try:
             logger.info(f"Scanning remote blocks for {self.img_name} in {self.remote_path}...")
             # 1. 一次性获取远程文件列表 (WebDAV ls 通常是一个 PROPFIND 请求)
-            files = self.client.ls(self.remote_path, detail=False)
+            try:
+                files = self.client.ls(self.remote_path, detail=False)
+            except Exception as ls_err:
+                logger.error(f"Failed to list remote directory {self.remote_path}: {ls_err}")
+                # 尝试创建目录，可能是不存在
+                try:
+                    self.client.mkdir(self.remote_path)
+                except: pass
+                files = []
             
             remote_block_ids = []
             for f in files:
@@ -242,10 +255,12 @@ class BlockManager:
             else:
                 logger.info(f"Scan complete: no remote blocks found for {self.img_name}")
             
-            # 标记扫描完成，无论是否发现文件
-            self._remote_dirs_checked = True 
         except Exception as e:
             logger.error(f"Failed to scan remote blocks: {e}")
+        finally:
+            # 标记扫描完成，无论是否发现文件，或者是否出错
+            # 这样可以防止 server.py 启动时卡死在等待扫描上
+            self._remote_dirs_checked = True
 
     def _speed_worker(self):
         while True:

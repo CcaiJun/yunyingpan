@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 import os
@@ -92,6 +92,7 @@ class DiskInstance:
         self.used_inodes = 0
         self.total_inodes = 0
         self.startup_progress = 0
+        self.instance_version = 0 # 增加版本号，用于区分不同的启动生命周期
 
 def load_configs() -> List[dict]:
     if os.path.exists(CONFIG_FILE):
@@ -130,6 +131,8 @@ def do_mount(inst: DiskInstance):
     if inst.status == "starting":
         return
     
+    inst.instance_version += 1
+    current_version = inst.instance_version
     inst.status = "starting"
     inst.error_msg = ""
     inst.startup_progress = 0
@@ -138,22 +141,67 @@ def do_mount(inst: DiskInstance):
         cfg = inst.config
         import subprocess
         import time
-        logger.info(f"Pre-cleaning mount paths for {cfg.disk_name}")
+        
+        # 分配端口 (避开 10809)
+        port = 10810 + list(disks.keys()).index(cfg.disk_name)
+        
+        logger.info(f"Pre-cleaning mount paths for {cfg.disk_name} (Port {port})")
         inst.startup_progress = 5
         
         # 0. 预清理
         try:
+            logger.info(f"Cleanup start (Version {current_version})")
             subprocess.run(['umount', '-l', inst.final_mountpoint], check=False, capture_output=True)
             if cfg.driver_mode == "fuse":
                 subprocess.run(['fusermount3', '-u', cfg.mount_path], check=False, capture_output=True)
             else:
+                # 尝试断开当前已知的 NBD 设备
                 if inst.nbd_device:
+                    logger.info(f"Disconnecting stale NBD device {inst.nbd_device} (Version {current_version})")
                     subprocess.run(['nbd-client', '-d', inst.nbd_device], check=False, capture_output=True)
+                
+                # 兜底清理：尝试断开所有可能的 NBD 连接，确保端口释放
+                for i in range(16):
+                    subprocess.run(['nbd-client', '-d', f'/dev/nbd{i}'], check=False, capture_output=True)
+                
+                if inst.nbd_server:
+                    try:
+                        logger.info(f"Stopping old NBD server (ID {inst.nbd_server.server_id})")
+                        inst.nbd_server.stop()
+                    except:
+                        pass
+                
+                # 等待旧线程彻底退出，释放端口和资源
+                if inst.thread and inst.thread.is_alive():
+                    logger.info(f"Waiting for old thread to exit (Version {current_version})")
+                    inst.thread.join(timeout=5)
+                    if inst.thread.is_alive():
+                        logger.warning(f"Old thread did not exit in time (Version {current_version})")
+                
+                # 确保端口已释放
+                import socket
+                port_free = False
+                for _ in range(5):
+                    try:
+                        test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        test_sock.bind(('127.0.0.1', port))
+                        test_sock.close()
+                        port_free = True
+                        break
+                    except:
+                        time.sleep(1)
+                
+                if not port_free:
+                    logger.warning(f"Port {port} still seems busy after 5s (Version {current_version})")
+                else:
+                    logger.info(f"Port {port} is now free (Version {current_version})")
             subprocess.run(['umount', '-l', cfg.mount_path], check=False, capture_output=True)
             os.makedirs(cfg.mount_path, exist_ok=True)
             os.makedirs(inst.final_mountpoint, exist_ok=True)
+            logger.info(f"Cleanup finished (Version {current_version})")
         except Exception as e:
-            logger.warning(f"Cleanup failed: {e}")
+            logger.warning(f"Cleanup failed (Version {current_version}): {e}")
         
         inst.startup_progress = 15
 
@@ -172,14 +220,22 @@ def do_mount(inst: DiskInstance):
             )
 
             def start_fuse():
+                vdrive_ptr = inst.vdrive
+                thread_version = current_version
+                logger.info(f"FUSE thread started (Version {thread_version})")
                 try:
                     FUSE(inst.vdrive, cfg.mount_path, foreground=True, nonempty=True, allow_other=True, direct_io=True)
                 except Exception as fuse_err:
-                    logger.error(f"FUSE error: {fuse_err}")
+                    logger.error(f"FUSE error (Version {thread_version}): {fuse_err}")
                 finally:
-                    if inst.status != "stopped":
-                        inst.status = "error"
-                        inst.error_msg = "FUSE 进程异常退出"
+                    # 使用版本号校验，确保只有最新启动的线程能修改状态
+                    if inst.instance_version == thread_version:
+                        if inst.status not in ["stopped", "starting"]:
+                            logger.error(f"FUSE process exited unexpectedly (Version {thread_version}, Status {inst.status})")
+                            inst.status = "error"
+                            inst.error_msg = "FUSE 进程异常退出"
+                        else:
+                            logger.info(f"FUSE thread finished naturally (Version {thread_version}, Status {inst.status})")
 
             inst.thread = threading.Thread(target=start_fuse, daemon=True)
             inst.thread.start()
@@ -191,11 +247,19 @@ def do_mount(inst: DiskInstance):
             inst.startup_progress = 30
             max_wait = 60
             while max_wait > 0 and not os.path.exists(target_path):
-                if not inst.thread.is_alive(): raise Exception("FUSE 进程启动失败")
+                if not inst.thread.is_alive():
+                    if inst.instance_version == current_version:
+                        raise Exception("FUSE 进程启动失败")
+                    else:
+                        return
                 time.sleep(1)
                 max_wait -= 1
                 inst.startup_progress = min(60, inst.startup_progress + 0.5)
-            if not os.path.exists(target_path): raise Exception("FUSE 镜像生成超时")
+            if not os.path.exists(target_path):
+                if inst.instance_version == current_version:
+                    raise Exception("FUSE 镜像生成超时")
+                else:
+                    return
             
             inst.startup_progress = 60
             mount_cmd = ['mount', '-o', 'loop', target_path, inst.final_mountpoint]
@@ -223,20 +287,54 @@ def do_mount(inst: DiskInstance):
             inst.nbd_server = NBDServer(bm, host='127.0.0.1', port=port)
             
             def start_nbd():
+                server_ptr = inst.nbd_server
+                thread_version = current_version
+                s_id = server_ptr.server_id
+                logger.info(f"NBD server thread started (Version {thread_version}, ID {s_id})")
                 try:
-                    inst.nbd_server.start()
+                    server_ptr.start()
+                    logger.info(f"NBD server thread finished normally (Version {thread_version}, ID {s_id})")
                 except Exception as e:
-                    logger.error(f"NBD server error: {e}")
+                    logger.error(f"NBD server error (Version {thread_version}, ID {s_id}): {e}")
+                    # 如果启动失败，且版本匹配，记录错误信息供 do_mount 使用
+                    if inst.instance_version == thread_version:
+                        inst.error_msg = f"NBD 服务端启动失败: {e}"
                 finally:
-                    if inst.status != "stopped":
-                        inst.status = "error"
-                        inst.error_msg = "NBD 服务端异常退出"
+                    # 使用版本号校验，确保只有最新启动的线程能修改状态
+                    # 只有在非主动停止且当前版本匹配时才设置错误状态
+                    if inst.instance_version == thread_version:
+                        # 如果 server_ptr.running 已经是 False，说明它根本没启动成功或者已经被 stop 了
+                        if inst.status == "running" and not server_ptr.running:
+                            logger.error(f"NBD server exited unexpectedly (Version {thread_version}, ID {s_id}, Status {inst.status})")
+                            inst.status = "error"
+                            inst.error_msg = "NBD 服务端异常退出"
+                        else:
+                            logger.info(f"NBD server thread cleanup (Version {thread_version}, ID {s_id}, Status {inst.status})")
 
             inst.thread = threading.Thread(target=start_nbd, daemon=True)
             inst.thread.start()
             
             # 寻找空闲 NBD 设备并连接
             inst.startup_progress = 30
+            
+            # 等待 server 启动并进入监听状态
+            max_wait = 10
+            while max_wait > 0 and not inst.nbd_server.running:
+                if not inst.thread.is_alive():
+                    # 只有在版本匹配时才抛出异常
+                    if inst.instance_version == current_version:
+                        raise Exception(f"NBD 服务端启动失败: {inst.error_msg}")
+                    else:
+                        return # 旧版本线程，直接退出
+                time.sleep(0.5)
+                max_wait -= 0.5
+            
+            if not inst.nbd_server.running:
+                if inst.instance_version == current_version:
+                    raise Exception("NBD 服务端启动超时，请检查端口是否被占用")
+                else:
+                    return # 旧版本线程，直接退出
+
             with global_nbd_lock:
                 nbd_dev = None
                 for i in range(16):
@@ -254,11 +352,24 @@ def do_mount(inst: DiskInstance):
                 if not nbd_dev: raise Exception("没有可用的 NBD 设备")
                 
                 inst.nbd_device = nbd_dev
-                time.sleep(1) # 等待 server 启动
                 inst.startup_progress = 45
                 
                 # 连接 NBD 客户端 (在锁内连接以防竞争)
-                subprocess.run(['nbd-client', '127.0.0.1', str(port), nbd_dev, '-N', 'default', '-g'], check=True)
+                logger.info(f"Connecting nbd-client to {nbd_dev} on port {port} (Version {current_version})")
+                nbd_client_cmd = ["nbd-client", "127.0.0.1", str(port), nbd_dev, "-N", "default", "-g", "-persist"]
+                try:
+                    # 使用 -persist 模式
+                    result = subprocess.run(nbd_client_cmd, capture_output=True, text=True, timeout=15)
+                    if result.returncode != 0:
+                        logger.error(f"nbd-client failed with return code {result.returncode}: {result.stderr}")
+                        raise Exception(f"nbd-client 连接失败: {result.stderr}")
+                    logger.info(f"nbd-client connected successfully (Version {current_version})")
+                except subprocess.TimeoutExpired:
+                    logger.error(f"nbd-client connection timed out (Version {current_version})")
+                    raise Exception("NBD 客户端连接超时")
+                except Exception as e:
+                    logger.error(f"nbd-client connection failed (Version {current_version}): {e}")
+                    raise Exception(f"NBD 客户端连接失败: {e}")
                 inst.startup_progress = 55
             
             inst.startup_progress = 60
@@ -277,13 +388,17 @@ def do_mount(inst: DiskInstance):
                 bm = inst.vdrive
             
             if bm and bm.use_remote:
-                logger.info(f"Waiting for remote scan to complete for {cfg.disk_name}...")
-                max_scan_wait = 30
-                while max_scan_wait > 0 and not bm._remote_dirs_checked:
-                    time.sleep(1)
-                    max_scan_wait -= 1
-                if not bm._remote_dirs_checked:
-                    logger.warning(f"Remote scan for {cfg.disk_name} is taking too long, proceeding anyway...")
+                # 如果数据库中已经有记录，说明之前扫描过，不需要等待本次扫描完成也可以进行 blkid
+                if bm.db.get_remote_exists_count() > 0:
+                    logger.info(f"Disk {cfg.disk_name} already has indexed blocks, skipping wait for remote scan.")
+                else:
+                    logger.info(f"Waiting for remote scan to complete for {cfg.disk_name}...")
+                    max_scan_wait = 30
+                    while max_scan_wait > 0 and not bm._remote_dirs_checked:
+                        time.sleep(1)
+                        max_scan_wait -= 1
+                    if not bm._remote_dirs_checked:
+                        logger.warning(f"Remote scan for {cfg.disk_name} is taking too long, proceeding anyway...")
         except: pass
 
         needs_format = True
@@ -296,9 +411,16 @@ def do_mount(inst: DiskInstance):
                 bm = inst.vdrive.bm
             else:
                 bm = inst.vdrive
-            if bm and bm.has_remote_data():
-                has_remote = True
-                logger.info(f"Disk {cfg.disk_name} has remote data, skipping auto-format to protect data.")
+            
+            # 优化：优先检查本地数据库记录，避免重复调用 ls
+            if bm:
+                remote_count = bm.db.get_remote_exists_count()
+                if remote_count > 0:
+                    has_remote = True
+                    logger.info(f"Disk {cfg.disk_name} has {remote_count} indexed remote blocks, skipping auto-format.")
+                elif bm.has_remote_data(): # 兜底检查一次
+                    has_remote = True
+                    logger.info(f"Disk {cfg.disk_name} has remote data (via ls), skipping auto-format.")
         except Exception as e:
             logger.warning(f"Failed to check remote data: {e}")
 
@@ -329,21 +451,36 @@ def do_mount(inst: DiskInstance):
 
         inst.startup_progress = 95
         # 最终挂载
-        logger.info(f"Final mount: {' '.join(mount_cmd)}")
+        logger.info(f"Final mount (Version {current_version}): {' '.join(mount_cmd)}")
         try:
-            subprocess.run(mount_cmd, check=True, timeout=30)
+            # 检查是否已经挂载，避免 "already mounted" 错误
+            check_mount = subprocess.run(['mount'], capture_output=True, text=True)
+            if inst.final_mountpoint in check_mount.stdout:
+                logger.info(f"Path {inst.final_mountpoint} already mounted, skipping mount command.")
+            else:
+                subprocess.run(mount_cmd, check=True, timeout=30)
         except subprocess.TimeoutExpired:
-            logger.error(f"Mount command timed out: {' '.join(mount_cmd)}")
+            logger.error(f"Mount command timed out (Version {current_version}): {' '.join(mount_cmd)}")
             raise Exception("挂载磁盘超时，系统响应缓慢")
+        except subprocess.CalledProcessError as e:
+            # 如果报错信息包含 "already mounted"，视为成功
+            if "already mounted" in str(e.stderr or "") or "already mounted" in str(e.output or ""):
+                logger.info(f"Mount reported 'already mounted', treating as success (Version {current_version})")
+            else:
+                logger.error(f"Mount command failed (Version {current_version}): {e}")
+                raise Exception(f"挂载失败: {e}")
         
         inst.startup_progress = 100
         inst.status = "running"
         logger.info(f"Disk {cfg.disk_name} started in {cfg.driver_mode} mode")
 
     except Exception as e:
-        inst.status = "error"
-        inst.error_msg = str(e)
-        logger.error(f"Mount failed: {e}")
+        import traceback
+        # 如果是新版本正在启动，不要用旧版本的错误覆盖它
+        if inst.instance_version == current_version:
+            inst.status = "error"
+            inst.error_msg = str(e)
+        logger.error(f"Mount failed (Version {current_version}): {e}\n{traceback.format_exc()}")
 
 def unmount_disk(inst: DiskInstance):
     inst.status = "stopped"
@@ -525,24 +662,32 @@ async def startup_event():
                     if instance.config.driver_mode == "fuse":
                         if is_loop_mounted and is_fuse_connected:
                             instance.loop_status = "mounted"
-                            instance.status = "running"
-                            instance.error_msg = ""
+                            # 仅当不在启动中时才更新为 running
+                            if instance.status != "starting":
+                                instance.status = "running"
+                                instance.error_msg = ""
                         elif is_loop_mounted:
                             instance.loop_status = "mounted"
-                            instance.status = "error"
-                            instance.error_msg = "FUSE 层连接断开 (Transport endpoint not connected)"
+                            # 仅当不在启动中时才报连接断开错误
+                            if instance.status != "starting":
+                                instance.status = "error"
+                                instance.error_msg = "FUSE 层连接断开 (Transport endpoint not connected)"
                         else:
                             instance.loop_status = "unmounted"
+                            # 仅当当前状态为 running 时才自动切换到 stopped，排除 starting 状态
                             if instance.status == "running":
                                 instance.status = "stopped"
                     else:
                         # NBD 模式
                         if is_loop_mounted:
                             instance.loop_status = "mounted"
-                            instance.status = "running"
-                            instance.error_msg = ""
+                            # 仅当不在启动中时才更新为 running
+                            if instance.status != "starting":
+                                instance.status = "running"
+                                instance.error_msg = ""
                         else:
                             instance.loop_status = "unmounted"
+                            # 仅当当前状态为 running 时才自动切换到 stopped，排除 starting 状态
                             if instance.status == "running":
                                 instance.status = "stopped"
                 
@@ -590,7 +735,9 @@ async def read_index():
 
 @app.get("/favicon.ico")
 async def favicon():
-    return FileResponse("favicon.ico")
+    if os.path.exists("favicon.ico"):
+        return FileResponse("favicon.ico")
+    return Response(status_code=204) # No content
 
 @app.get("/disks")
 async def list_disks():
@@ -857,23 +1004,13 @@ async def mount_drive(config: MountConfig):
     }
 
 @app.post("/unmount/{disk_name}")
-def unmount_disk(disk_name: str):
+def unmount_disk_endpoint(disk_name: str):
     instance = disks.get(disk_name)
     if not instance:
         raise HTTPException(status_code=404, detail="磁盘不存在")
     
     try:
-        import subprocess
-        # 1. 卸载 Loop 挂载点 (e.g., /mnt/v_disks/256)
-        if os.path.ismount(instance.final_mountpoint):
-            subprocess.run(['umount', '-l', instance.final_mountpoint], check=False)
-        
-        # 2. 卸载 FUSE 挂载点 (e.g., /mnt/pan256)
-        if os.path.ismount(instance.config.mount_path):
-            subprocess.run(['fusermount3', '-u', instance.config.mount_path], check=False)
-            subprocess.run(['umount', '-l', instance.config.mount_path], check=False)
-        
-        instance.status = "stopped"
+        unmount_disk(instance)
         instance.loop_status = "unmounted"
         return {"message": f"磁盘 {disk_name} 已卸载"}
     except Exception as e:
