@@ -488,7 +488,7 @@
                     } catch (e) {
                         controller.abort();
                     }
-                }, 10000);
+                }, 15000); // 增加超时到 15s
 
                 const res = await fetch(url, {
                     cache: 'no-cache',
@@ -516,24 +516,24 @@
                 console.error("Fetch disks failed:", err);
                 fetchFailureCount++;
                 
-                // 只有在连续失败超过 2 次时，或者从未成功加载过数据时才显示错误
+                // 只有在连续失败超过 3 次时，或者从未成功加载过数据时才显示错误
                 const container = document.getElementById('diskList');
                 const isCriticalError = !lastFetchSuccess || container.innerHTML.trim() === '' || container.querySelector('.fa-exclamation-triangle');
                 
-                if (isCriticalError) {
+                if (isCriticalError && fetchFailureCount >= 3) {
                     container.innerHTML = `
                         <div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #e74c3c;">
                             <i class="fas fa-exclamation-triangle fa-3x mb-3"></i>
                             <p>无法连接到后端服务 (${window.location.host})</p>
-                            <p class="text-sm mt-2">错误详情: ${err.name === 'AbortError' ? '请求超时 (10s)' : err.message}</p>
+                            <p class="text-sm mt-2">错误详情: ${err.name === 'AbortError' ? '请求超时 (15s)' : err.message}</p>
                             <div class="mt-4 space-x-2">
                                 <button onclick="fetchDisks()" class="bg-slate-200 px-4 py-2 rounded text-slate-700 hover:bg-slate-300">手动重试</button>
                                 <button onclick="window.location.reload()" class="bg-blue-600 px-4 py-2 rounded text-white hover:bg-blue-700">刷新页面</button>
                             </div>
                         </div>`;
-                } else if (fetchFailureCount >= 2) {
-                    // 连续失败两次才显示顶部错误条
-                    showTransientError(`连接后端失败: ${err.message}`);
+                } else if (fetchFailureCount >= 3) {
+                    // 连续失败三次才显示顶部错误条
+                    showTransientError(`连接后端失败 (${fetchFailureCount}次): ${err.message}`);
                 }
             } finally {
                 isFetching = false;

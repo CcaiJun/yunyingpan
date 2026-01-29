@@ -364,7 +364,7 @@ async def startup_event():
                     except Exception as e:
                         logger.error(f"Error updating stats for {name}: {e}")
 
-                    # 2. 计算缓存大小 (优化：降低频率)
+                    # 2. 计算缓存大小 (优化：使用 scandir 并降低频率)
                     if check_cache:
                         # 更新 Inode 使用情况 (仅在已挂载时)
                         if instance.loop_status == "mounted" and os.path.exists(instance.final_mountpoint):
@@ -382,41 +382,37 @@ async def startup_event():
                         total_size = 0
                         try:
                             if os.path.exists(instance.config.cache_dir):
-                                # 严格匹配：v_drive.py 中使用的是 self.img_name + "_blk_"
-                                # 其中 self.img_name = disk_name + ".img" (如果原名不带.img)
                                 base_name = instance.config.disk_name
                                 if not base_name.endswith('.img'):
                                     base_name = f"{base_name}.img"
                                 
-                                # 构建完整前缀，例如 "disk1.img_blk_"
-                                # 这样可以避免匹配到 "disk11.img_blk_"
-                                prefix = f"{base_name}_blk_"
-                                
-                                for f in os.listdir(instance.config.cache_dir):
-                                    if f.startswith(prefix) and f.endswith(".dat"):
-                                        try:
-                                            f_path = os.path.join(instance.config.cache_dir, f)
-                                            # 使用 st_blocks * 512 获取文件在磁盘上实际占用的空间 (考虑稀疏文件)
-                                            stat_info = os.stat(f_path)
-                                            total_size += stat_info.st_blocks * 512
-                                        except: pass
+                                # 使用 scandir 提高效率
+                                with os.scandir(instance.config.cache_dir) as it:
+                                    for entry in it:
+                                        # 匹配分块文件和元数据文件
+                                        if entry.is_file() and (entry.name.startswith(base_name + "_blk_") or entry.name.startswith("." + base_name + "_metadata.db")):
+                                            try:
+                                                stat_info = entry.stat()
+                                                total_size += stat_info.st_blocks * 512
+                                            except: pass
                         except Exception as e:
                             logger.error(f"Cache stats error for {name}: {e}")
                         instance.cache_usage_bytes = total_size
-                    
+
                     # 3. 检测挂载状态
-                    # 优化正则匹配，减少开销
                     is_loop_mounted = f" {instance.final_mountpoint} " in mounts_output or mounts_output.endswith(f" {instance.final_mountpoint}")
                     is_fuse_mounted_in_list = f" {instance.config.mount_path} " in mounts_output or mounts_output.endswith(f" {instance.config.mount_path}")
                     
                     is_fuse_connected = False
                     if is_fuse_mounted_in_list:
+                        # 使用 subprocess 调用 stat 并设置超时，防止 FUSE 挂起导致主状态线程死锁
                         try:
-                            # 仅尝试获取元数据，不读内容，避免 FUSE 挂起导致后端挂起
-                            # 使用低层级的 os.stat 并设置超时（如果可能）
-                            os.stat(instance.config.mount_path)
+                            subprocess.run(['stat', '-t', instance.config.mount_path], 
+                                         capture_output=True, timeout=1, check=True)
                             is_fuse_connected = True
-                        except:
+                        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                            is_fuse_connected = False
+                        except Exception:
                             is_fuse_connected = False
                     
                     if instance.config.driver_mode == "fuse":
@@ -490,7 +486,8 @@ async def favicon():
     return FileResponse("favicon.ico")
 
 @app.get("/disks")
-def list_disks():
+async def list_disks():
+    start_time = time.time()
     result = []
     for name, instance in disks.items():
         result.append({
@@ -511,6 +508,11 @@ def list_disks():
             "error_msg": instance.error_msg,
             "final_mountpoint": instance.final_mountpoint
         })
+    
+    duration = time.time() - start_time
+    if duration > 0.5:
+        logger.warning(f"list_disks took {duration:.2f}s")
+        
     return result
 
 @app.post("/mount")
