@@ -6,7 +6,6 @@ import threading
 import logging
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from v_drive import VDrive, FUSE
 import psutil
 import sqlite3
 import time
@@ -15,6 +14,17 @@ import subprocess
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+import sys
+import os
+logger.info(f"Python Executable: {sys.executable}")
+logger.info(f"Python Path: {sys.path}")
+
+try:
+    from v_drive import VDrive, FUSE
+except ImportError as e:
+    logger.error(f"Failed to import v_drive: {e}")
+    # Continue to see if we can still start the server
 
 app = FastAPI()
 
@@ -44,7 +54,7 @@ class MountConfig(BaseModel):
     block_size_mb: int = 4
     remote_path: str = "blocks"
     concurrency: int = 5
-    inode_ratio: int = 4194304  # 默认 4MB (对应 largefile4)
+    inode_ratio: int = 16384  # 默认 16KB (ext4 默认值)
     compression: str = "none"   # none, zstd, lz4
     compression_level: int = 3
     driver_mode: str = "fuse" # fuse or nbd
