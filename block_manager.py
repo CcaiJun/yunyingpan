@@ -232,7 +232,6 @@ class BlockManager:
                 # 2. 批量更新数据库 (单个事务)
                 self.db.batch_set_remote_exists(remote_block_ids)
                 logger.info(f"Scan complete: found and indexed {len(remote_block_ids)} existing remote blocks for {self.img_name}")
-                self._remote_dirs_checked = True 
                 
                 # 预热逻辑：主动触发前 2 个块的下载（通常包含文件系统超级块和根 Inode）
                 # 这会让挂载后的第一次 ls 变得飞快
@@ -242,6 +241,9 @@ class BlockManager:
                         threading.Thread(target=self.read, args=(self.block_size, bid * self.block_size), daemon=True).start()
             else:
                 logger.info(f"Scan complete: no remote blocks found for {self.img_name}")
+            
+            # 标记扫描完成，无论是否发现文件
+            self._remote_dirs_checked = True 
         except Exception as e:
             logger.error(f"Failed to scan remote blocks: {e}")
 
@@ -427,7 +429,14 @@ class BlockManager:
             block_path = self._get_block_path(block_id)
             status, remote_exists = self.db.get_block_info(block_id)
             if not os.path.exists(block_path):
-                remote_exists_check = remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat")
+                # 只有在初次启动且没有进行过远程扫描时才调用 exists 检查
+                remote_exists_check = remote_exists
+                if not remote_exists and self.use_remote and not self._remote_dirs_checked:
+                    try:
+                        remote_exists_check = self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat")
+                    except:
+                        remote_exists_check = False
+                
                 if self.use_remote and remote_exists_check:
                     try:
                         with self.downloading_lock: self.downloading_count += 1
@@ -500,7 +509,14 @@ class BlockManager:
             block_path = self._get_block_path(block_id)
             status, remote_exists = self.db.get_block_info(block_id)
             if not os.path.exists(block_path):
-                remote_exists_check = remote_exists or self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat")
+                # 只有在初次启动且没有进行过远程扫描时才调用 exists 检查
+                remote_exists_check = remote_exists
+                if not remote_exists and self.use_remote and not self._remote_dirs_checked:
+                    try:
+                        remote_exists_check = self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat")
+                    except:
+                        remote_exists_check = False
+                
                 if self.use_remote and remote_exists_check:
                     try:
                         with self.downloading_lock: self.downloading_count += 1

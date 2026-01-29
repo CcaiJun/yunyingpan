@@ -67,6 +67,11 @@ class MountConfig(BaseModel):
 
 class DiskInstance:
     def __init__(self, config: MountConfig):
+        # 清理配置中的空格
+        config.dav_url = config.dav_url.strip()
+        config.dav_user = config.dav_user.strip()
+        config.dav_password = config.dav_password.strip()
+        
         self.config = config
         self.vdrive = None
         self.nbd_server = None
@@ -86,6 +91,7 @@ class DiskInstance:
         self.stored_size_bytes = 0
         self.used_inodes = 0
         self.total_inodes = 0
+        self.startup_progress = 0
 
 def load_configs() -> List[dict]:
     if os.path.exists(CONFIG_FILE):
@@ -126,12 +132,14 @@ def do_mount(inst: DiskInstance):
     
     inst.status = "starting"
     inst.error_msg = ""
+    inst.startup_progress = 0
     
     try:
         cfg = inst.config
         import subprocess
         import time
         logger.info(f"Pre-cleaning mount paths for {cfg.disk_name}")
+        inst.startup_progress = 5
         
         # 0. 预清理
         try:
@@ -146,9 +154,12 @@ def do_mount(inst: DiskInstance):
             os.makedirs(inst.final_mountpoint, exist_ok=True)
         except Exception as e:
             logger.warning(f"Cleanup failed: {e}")
+        
+        inst.startup_progress = 15
 
         if cfg.driver_mode == "fuse":
             # --- FUSE 模式 ---
+            inst.startup_progress = 20
             from v_drive import VDrive, FUSE
             inst.vdrive = VDrive(
                 dav_url=cfg.dav_url, dav_user=cfg.dav_user, dav_password=cfg.dav_password, 
@@ -177,17 +188,21 @@ def do_mount(inst: DiskInstance):
             target_path = os.path.join(cfg.mount_path, img_name)
             
             # 等待 FUSE 镜像文件出现
+            inst.startup_progress = 30
             max_wait = 60
             while max_wait > 0 and not os.path.exists(target_path):
                 if not inst.thread.is_alive(): raise Exception("FUSE 进程启动失败")
                 time.sleep(1)
                 max_wait -= 1
+                inst.startup_progress = min(60, inst.startup_progress + 0.5)
             if not os.path.exists(target_path): raise Exception("FUSE 镜像生成超时")
             
+            inst.startup_progress = 60
             mount_cmd = ['mount', '-o', 'loop', target_path, inst.final_mountpoint]
 
         else:
             # --- NBD 模式 ---
+            inst.startup_progress = 20
             from nbd_server import NBDServer
             from block_manager import BlockManager
             
@@ -221,6 +236,7 @@ def do_mount(inst: DiskInstance):
             inst.thread.start()
             
             # 寻找空闲 NBD 设备并连接
+            inst.startup_progress = 30
             with global_nbd_lock:
                 nbd_dev = None
                 for i in range(16):
@@ -233,19 +249,43 @@ def do_mount(inst: DiskInstance):
                         if dev not in mount_check.stdout:
                             nbd_dev = dev
                             break
+                    inst.startup_progress = min(40, inst.startup_progress + 0.5)
                 
                 if not nbd_dev: raise Exception("没有可用的 NBD 设备")
                 
                 inst.nbd_device = nbd_dev
                 time.sleep(1) # 等待 server 启动
+                inst.startup_progress = 45
                 
                 # 连接 NBD 客户端 (在锁内连接以防竞争)
                 subprocess.run(['nbd-client', '127.0.0.1', str(port), nbd_dev, '-N', 'default', '-g'], check=True)
+                inst.startup_progress = 55
             
+            inst.startup_progress = 60
             target_path = nbd_dev
             mount_cmd = ['mount', nbd_dev, inst.final_mountpoint]
 
         # 检查并格式化
+        inst.startup_progress = 65
+        
+        # 等待远程扫描完成，避免 blkid 触发大量 exists 请求导致超时
+        try:
+            bm = None
+            if inst.config.driver_mode == "fuse":
+                bm = inst.vdrive.bm
+            else:
+                bm = inst.vdrive
+            
+            if bm and bm.use_remote:
+                logger.info(f"Waiting for remote scan to complete for {cfg.disk_name}...")
+                max_scan_wait = 30
+                while max_scan_wait > 0 and not bm._remote_dirs_checked:
+                    time.sleep(1)
+                    max_scan_wait -= 1
+                if not bm._remote_dirs_checked:
+                    logger.warning(f"Remote scan for {cfg.disk_name} is taking too long, proceeding anyway...")
+        except: pass
+
         needs_format = True
         
         # 增加逻辑：如果远程已经有数据块，绝对不要格式化，否则会破坏原有数据
@@ -262,27 +302,41 @@ def do_mount(inst: DiskInstance):
         except Exception as e:
             logger.warning(f"Failed to check remote data: {e}")
 
+        inst.startup_progress = 75
         try:
-            res = subprocess.run(['blkid', target_path], capture_output=True, text=True)
+            res = subprocess.run(['blkid', target_path], capture_output=True, text=True, timeout=30)
             if "TYPE=" in res.stdout: 
                 needs_format = False
                 logger.info(f"Disk {cfg.disk_name} already has a filesystem: {res.stdout.strip()}")
+        except subprocess.TimeoutExpired:
+            logger.error(f"blkid timed out for {target_path}")
+            raise Exception("读取文件系统超时，磁盘可能已卡死，请尝试重启应用或重置磁盘")
         except: pass
 
+        inst.startup_progress = 85
         if needs_format and not has_remote:
             logger.info(f"Formatting {target_path}...")
-            subprocess.run(['mkfs.ext4', '-F', '-i', str(cfg.inode_ratio), '-b', '4096', 
-                          '-O', '^metadata_csum', '-E', 'lazy_itable_init=1,lazy_journal_init=1', target_path], check=True)
+            try:
+                subprocess.run(['mkfs.ext4', '-F', '-i', str(cfg.inode_ratio), '-b', '4096', 
+                              '-O', '^metadata_csum', '-E', 'lazy_itable_init=1,lazy_journal_init=1', target_path], 
+                              check=True, timeout=60)
+            except subprocess.TimeoutExpired:
+                logger.error(f"mkfs.ext4 timed out for {target_path}")
+                raise Exception("格式化磁盘超时，可能存在 I/O 阻塞")
         elif needs_format and has_remote:
             logger.error(f"Disk {cfg.disk_name} needs format but has remote data! Skipping format to prevent data loss. Please check if parameters (block size, compression) match the original disk.")
-            # 如果确实需要格式化但有远程数据，我们选择报错而不是自动格式化
-            # 这种情况通常是因为参数不匹配导致 blkid 读不出文件系统
             raise Exception("无法识别文件系统，且检测到云端已有数据。请检查磁盘参数（分块大小、压缩算法等）是否与创建时一致。")
 
+        inst.startup_progress = 95
         # 最终挂载
         logger.info(f"Final mount: {' '.join(mount_cmd)}")
-        subprocess.run(mount_cmd, check=True)
+        try:
+            subprocess.run(mount_cmd, check=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            logger.error(f"Mount command timed out: {' '.join(mount_cmd)}")
+            raise Exception("挂载磁盘超时，系统响应缓慢")
         
+        inst.startup_progress = 100
         inst.status = "running"
         logger.info(f"Disk {cfg.disk_name} started in {cfg.driver_mode} mode")
 
@@ -559,7 +613,8 @@ async def list_disks():
             "used_inodes": instance.used_inodes,
             "total_inodes": instance.total_inodes,
             "error_msg": instance.error_msg,
-            "final_mountpoint": instance.final_mountpoint
+            "final_mountpoint": instance.final_mountpoint,
+            "startup_progress": instance.startup_progress
         })
     
     duration = time.time() - start_time
@@ -868,6 +923,11 @@ def delete_disk(disk_name: str, delete_remote: bool = False):
                         try:
                             os.remove(os.path.join(cache_dir, f))
                         except: pass
+                # 如果缓存目录为空（例如专为该磁盘创建的目录），则尝试删除目录
+                try:
+                    if not os.listdir(cache_dir):
+                        os.rmdir(cache_dir)
+                except: pass
         except Exception as e:
             logger.error(f"Failed to delete local cache for {disk_name}: {e}")
 

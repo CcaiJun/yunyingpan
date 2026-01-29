@@ -781,6 +781,19 @@
                         <span class="status-badge ${statusClass}">${disk.status === 'running' ? '运行中' : (disk.status === 'stopped' ? '已停止' : (disk.status === 'starting' ? '启动中...' : '状态异常'))}</span>
                     </div>
                     
+                    <!-- 启动进度条 (仅启动中显示) -->
+                    ${disk.status === 'starting' ? `
+                    <div class="mb-4">
+                        <div class="flex justify-between items-center mb-1">
+                            <span class="text-[10px] text-blue-600 font-bold uppercase tracking-wider">正在初始化系统资源...</span>
+                            <span class="text-[10px] text-blue-600 font-mono font-bold">${Math.round(disk.startup_progress || 0)}%</span>
+                        </div>
+                        <div class="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden border border-slate-200">
+                            <div class="bg-blue-500 h-full transition-all duration-500 ease-out shadow-[0_0_8px_rgba(59,130,246,0.5)]" style="width: ${disk.startup_progress || 0}%"></div>
+                        </div>
+                    </div>
+                    ` : ''}
+                    
                     <!-- 速度监控 -->
                     <div class="grid grid-cols-2 gap-2 mb-4 p-3 bg-slate-50 rounded-lg border border-slate-100">
                         <div class="text-center border-r border-slate-200">
@@ -854,7 +867,7 @@
                             `<button onclick="mountDisk('${disk.disk_name}')" class="bg-blue-600 text-white px-3 py-1.5 rounded text-sm hover:bg-blue-700 transition flex-1" ${disk.status === 'starting' ? 'disabled style="opacity:0.5; cursor:not-allowed;"' : ''}>${disk.status === 'starting' ? '启动中' : '启动'}</button>`
                         }
                         <button onclick="editDisk('${disk.disk_name}')" class="border border-slate-200 px-3 py-1.5 rounded text-sm hover:bg-slate-50 transition">配置</button>
-                        <button onclick="deleteDisk('${disk.disk_name}')" class="bg-red-500 text-white px-3 py-1.5 rounded text-sm hover:bg-red-600 transition">删除</button>
+                        <button onclick="deleteDisk('${disk.disk_name}')" class="bg-red-500 text-white px-3 py-1.5 rounded text-sm hover:bg-red-600 transition" ${disk.status === 'starting' ? 'disabled style="opacity:0.5; cursor:not-allowed;" title="启动中禁止删除硬盘"' : ''}>删除</button>
                     </div>
                 `;
                 container.appendChild(card);
