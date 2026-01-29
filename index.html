@@ -1305,9 +1305,16 @@
                                          `<span class="text-[10px] text-amber-600 ml-6"><i class="fas fa-folder-open mr-1"></i>仅检测到数据文件夹</span>`
                                      }
                                  </div>
-                                 <button onclick="prefillDiskRestore('${disk}')" class="bg-blue-600 text-white px-3 py-1 rounded text-xs font-bold hover:bg-blue-700 transition">
-                                     ${hasConfig ? '一键恢复' : '手动恢复'}
-                                 </button>
+                                 <div class="flex gap-2">
+                                     ${hasConfig ? 
+                                         `<button onclick="prefillDiskRestore('${disk}', true)" class="bg-green-600 text-white px-3 py-1 rounded text-xs font-bold hover:bg-green-700 transition">
+                                             立即恢复
+                                         </button>` : ''
+                                     }
+                                     <button onclick="prefillDiskRestore('${disk}', false)" class="bg-blue-600 text-white px-3 py-1 rounded text-xs font-bold hover:bg-blue-700 transition">
+                                         ${hasConfig ? '查看参数' : '手动恢复'}
+                                     </button>
+                                 </div>
                              `;
                              listDiv.appendChild(item);
                          });
@@ -1317,7 +1324,7 @@
             }
         }
 
-        async function prefillDiskRestore(diskName) {
+        async function prefillDiskRestore(diskName, autoMount = false) {
             const url = document.getElementById('restore_dav_url').value.trim();
             const user = document.getElementById('restore_dav_user').value.trim();
             const pass = document.getElementById('restore_dav_password').value.trim();
@@ -1385,6 +1392,13 @@
                     }
                     
                     console.log("Successfully loaded cloud config for disk:", diskName);
+                    
+                    if (autoMount) {
+                        // 立即恢复模式：直接调用 saveConfig
+                        console.log("Auto mounting disk:", diskName);
+                        await saveConfig();
+                        return;
+                    }
                 } else {
                     console.warn("Cloud config not found, using defaults");
                     autoFillPaths();
@@ -1394,7 +1408,7 @@
                 autoFillPaths();
             }
             
-            // 自动跳转到新增磁盘标签
+            // 自动跳转到新增磁盘标签 (手动模式)
             showTab('settings');
             alert(`已为您从云端加载并填充磁盘 "${diskName}" 的完整配置。请检查并点击“保存并创建磁盘”来完成恢复。`);
         }
@@ -1415,8 +1429,8 @@
                 // 触发路径自动填充（以防万一 disk_name 已经有值）
                 autoFillPaths();
                 
-                alert("本机标识已更新。您现在可以在“新增磁盘”中填入磁盘名称来恢复之前的磁盘了。");
-                showTab('dashboard');
+                // 不再强制跳转和弹窗，让用户留在当前页面继续操作磁盘列表
+                console.log("本机标识已更新为:", selected);
             }
         }
 
