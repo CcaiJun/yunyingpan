@@ -41,6 +41,10 @@ from typing import Dict, List, Optional
 
 # 配置持久化路径
 CONFIG_FILE = "disks_config.json"
+SYSTEM_CONFIG_FILE = "system_config.json"
+
+class SystemConfig(BaseModel):
+    computer_name: str = "default_pc"
 
 class MountConfig(BaseModel):
     dav_url: str
@@ -95,6 +99,23 @@ def load_configs() -> List[dict]:
 def save_configs(configs: List[dict]):
     with open(CONFIG_FILE, 'w') as f:
         json.dump(configs, f, indent=4)
+
+def load_system_config() -> SystemConfig:
+    if os.path.exists(SYSTEM_CONFIG_FILE):
+        try:
+            with open(SYSTEM_CONFIG_FILE, 'r') as f:
+                data = json.load(f)
+                return SystemConfig(**data)
+        except:
+            return SystemConfig()
+    return SystemConfig()
+
+def save_system_config(config: SystemConfig):
+    with open(SYSTEM_CONFIG_FILE, 'w') as f:
+        json.dump(config.dict(), f, indent=4)
+
+# 全局变量
+system_config = load_system_config()
 
 # 全局锁，防止 NBD 设备分配竞争
 global_nbd_lock = threading.Lock()
@@ -525,8 +546,159 @@ async def list_disks():
         
     return result
 
+@app.get("/api/system/config")
+async def get_system_config():
+    return system_config
+
+@app.post("/api/system/config")
+async def update_system_config(config: SystemConfig):
+    global system_config
+    system_config = config
+    save_system_config(system_config)
+    return {"status": "ok"}
+
+@app.post("/api/webdav/list_computers")
+async def list_webdav_computers(req: Request):
+    data = await req.json()
+    dav_url = data.get("dav_url")
+    dav_user = data.get("dav_user")
+    dav_password = data.get("dav_password")
+    
+    if not all([dav_url, dav_user, dav_password]):
+        raise HTTPException(status_code=400, detail="Missing credentials")
+    
+    from webdav4.client import Client as WebDAVClient
+    try:
+        client = WebDAVClient(dav_url, auth=(dav_user, dav_password))
+        
+        # 确保 v_disks 目录存在
+        if not client.exists("v_disks"):
+            try:
+                client.mkdir("v_disks")
+            except:
+                pass
+            return []
+            
+        # 列出 v_disks 下的所有目录
+        items = client.ls("v_disks", detail=True)
+        # 过滤出目录，并提取名称
+        computers = [item['name'].strip('/') for item in items if item['type'] == 'directory']
+        return computers
+    except Exception as e:
+        logger.error(f"WebDAV list failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/webdav/list_disks")
+async def list_webdav_disks(req: Request):
+    data = await req.json()
+    dav_url = data.get("dav_url")
+    dav_user = data.get("dav_user")
+    dav_password = data.get("dav_password")
+    computer_name = data.get("computer_name")
+    
+    if not all([dav_url, dav_user, dav_password, computer_name]):
+        raise HTTPException(status_code=400, detail="Missing parameters")
+    
+    from webdav4.client import Client as WebDAVClient
+    try:
+        client = WebDAVClient(dav_url, auth=(dav_user, dav_password))
+        path = f"v_disks/{computer_name}"
+        
+        if not client.exists(path):
+            return []
+            
+        items = client.ls(path, detail=True)
+        disks_info = []
+        for item in items:
+            if item['type'] == 'directory':
+                name = item['name'].strip('/')
+                has_config = client.exists(f"{path}/{name}/config.json")
+                disks_info.append({"name": name, "has_config": has_config})
+        return disks_info
+    except Exception as e:
+        logger.error(f"WebDAV list disks failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/webdav/get_disk_config")
+async def get_webdav_disk_config(req: Request):
+    data = await req.json()
+    dav_url = data.get("dav_url")
+    dav_user = data.get("dav_user")
+    dav_password = data.get("dav_password")
+    computer_name = data.get("computer_name")
+    disk_name = data.get("disk_name")
+    
+    if not all([dav_url, dav_user, dav_password, computer_name, disk_name]):
+        raise HTTPException(status_code=400, detail="Missing parameters")
+    
+    from webdav4.client import Client as WebDAVClient
+    import io
+    try:
+        client = WebDAVClient(dav_url, auth=(dav_user, dav_password))
+        # 尝试获取 config.json
+        # 路径规则：v_disks/计算机名/虚拟硬盘名/config.json
+        config_path = f"v_disks/{computer_name}/{disk_name}/config.json"
+        
+        if not client.exists(config_path):
+            return {"status": "not_found", "message": "Cloud config not found"}
+            
+        # 下载并解析
+        bio = io.BytesIO()
+        client.download_fileobj(config_path, bio)
+        bio.seek(0)
+        config_json = json.load(bio)
+        return {"status": "ok", "config": config_json}
+    except Exception as e:
+        logger.error(f"WebDAV get config failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def sync_config_to_webdav_task(config: MountConfig):
+    """后台同步配置到 WebDAV 的任务"""
+    try:
+        from webdav4.client import Client as WebDAVClient
+        import io
+        logger.info(f"Background: Starting cloud config sync for disk: {config.disk_name}")
+        client = WebDAVClient(config.dav_url, auth=(config.dav_user, config.dav_password))
+        
+        remote_path_clean = config.remote_path.strip('/')
+        remote_config_path = f"{remote_path_clean}/config.json"
+        
+        # 确保远程目录存在
+        parts = remote_path_clean.split('/')
+        current = ""
+        for part in parts:
+            if not part: continue
+            current = f"{current}/{part}" if current else part
+            if not client.exists(current):
+                client.mkdir(current)
+
+        # 将配置转换为 JSON 字符串并上传
+        config_data = config.model_dump()
+        config_json = json.dumps(config_data, indent=4, ensure_ascii=False)
+        client.upload_fileobj(io.BytesIO(config_json.encode('utf-8')), remote_config_path, overwrite=True)
+        logger.info(f"Background: Successfully synced config to cloud: {remote_config_path}")
+    except Exception as e:
+        logger.error(f"Background: Failed to sync config to cloud: {e}")
+
 @app.post("/mount")
 async def mount_drive(config: MountConfig):
+    # 路径规则强制执行/默认化
+    # 1. WebDAV 保存路径：v_disks/计算机名/虚拟硬盘名
+    if not config.remote_path or config.remote_path in ["blocks", "v_disks/blocks", f"v_disks/{config.disk_name}"]:
+        config.remote_path = f"v_disks/{system_config.computer_name}/{config.disk_name}"
+        logger.info(f"Automatically set remote_path to {config.remote_path}")
+
+    # 2. 挂载路径 (FUSE 镜像层)：/mnt/fuse_mirror/虚拟硬盘名
+    # 如果用户没填，或者使用的是旧的默认路径，则自动修正
+    if not config.mount_path or any(old in config.mount_path for old in ["/tmp/v_drive_raw", "/mnt/v_drive_raw"]):
+        config.mount_path = f"/mnt/fuse_mirror/{config.disk_name}"
+        logger.info(f"Automatically set mount_path to {config.mount_path}")
+
+    # 3. 本地缓存目录：/var/cache/虚拟硬盘名
+    if not config.cache_dir or any(old in config.cache_dir for old in ["/tmp/v_drive_cache", "cache"]):
+        config.cache_dir = f"/var/cache/{config.disk_name}"
+        logger.info(f"Automatically set cache_dir to {config.cache_dir}")
+
     # 检查是否是更新现有磁盘
     existing_instance = disks.get(config.disk_name)
     if existing_instance:
@@ -572,13 +744,28 @@ async def mount_drive(config: MountConfig):
         configs.append(config.model_dump())
     save_configs(configs)
 
+    # 异步同步配置到云端 WebDAV (config.json)
+    # 不再阻塞主线程，改为后台执行
+    threading.Thread(target=sync_config_to_webdav_task, args=(config,), daemon=True).start()
+    
+    sync_status = "pending"
+    sync_msg = f"配置已保存，正在后台同步至云端: {config.remote_path.strip('/')}/config.json"
+
     if instance.status == "running":
-        return {"message": f"磁盘 {config.disk_name} 配置已更新（部分改动需重启生效）"}
+        return {
+            "message": f"磁盘 {config.disk_name} 配置已更新（部分改动需重启生效）",
+            "sync_status": sync_status,
+            "sync_msg": sync_msg
+        }
 
     # 异步执行挂载逻辑
     threading.Thread(target=do_mount, args=(instance,), daemon=True).start()
     
-    return {"message": f"磁盘 {config.disk_name} 挂载任务已启动"}
+    return {
+        "message": f"磁盘 {config.disk_name} 挂载任务已启动",
+        "sync_status": sync_status,
+        "sync_msg": sync_msg
+    }
 
 @app.post("/unmount/{disk_name}")
 def unmount_disk(disk_name: str):

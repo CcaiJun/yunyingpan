@@ -61,6 +61,62 @@
         .status-error { background: #fff5f5; color: #e74c3c; }
         .status-starting { background: #fff9db; color: #f08c00; }
         
+        /* Toggle Switch 样式 */
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 44px;
+            height: 22px;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #cbd5e1;
+            transition: .4s;
+            border-radius: 22px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #3b82f6;
+        }
+        input:focus + .slider {
+            box-shadow: 0 0 1px #3b82f6;
+        }
+        input:checked + .slider:before {
+            transform: translateX(22px);
+        }
+        .path-group {
+            transition: all 0.3s ease;
+            max-height: 500px;
+            overflow: hidden;
+        }
+        .path-group.hidden-path {
+            max-height: 0;
+            opacity: 0;
+            margin: 0;
+            padding: 0;
+            pointer-events: none;
+        }
+        
         /* Modal 样式 */
         .modal {
             display: none;
@@ -99,6 +155,9 @@
             <a href="#" onclick="showTab('settings')" class="flex items-center p-3 rounded hover:bg-slate-800 transition" id="nav-settings">
                 <i class="fas fa-plus-circle w-6"></i> 新增磁盘
             </a>
+            <a href="#" onclick="showTab('system')" class="flex items-center p-3 rounded hover:bg-slate-800 transition" id="nav-system">
+                <i class="fas fa-cog w-6"></i> 系统与还原
+            </a>
         </nav>
         <div class="absolute bottom-10 left-6 text-slate-400 text-sm">
             v0.1.0-alpha
@@ -117,12 +176,12 @@
 
         <!-- Settings Tab -->
         <div id="settings" class="tab-content">
-            <h2 class="text-3xl font-bold mb-8 text-slate-800">挂载设置</h2>
-            <div class="bg-white p-8 rounded-xl shadow-sm border border-slate-100 max-w-2xl">
-                <form class="space-y-6">
+            <h2 class="text-3xl font-bold mb-8 text-slate-800">新增磁盘</h2>
+            <div class="bg-white p-8 rounded-xl shadow-sm border border-slate-100">
+                <form id="settingsForm" class="space-y-6">
                     <div>
                         <label class="block text-sm font-medium text-slate-700 mb-2">存储源类型</label>
-                        <select class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        <select id="storage_type" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                             <option value="webdav">WebDAV (推荐)</option>
                             <option value="s3">Amazon S3 / 兼容 S3</option>
                             <option value="local">本地目录 (测试用)</option>
@@ -147,26 +206,20 @@
                     <hr class="border-slate-100">
 
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div class="md:col-span-2">
-                            <div class="p-4 bg-blue-50 border border-blue-200 rounded-lg mb-4">
-                                <p class="text-sm text-blue-700 font-medium"><i class="fas fa-microchip mr-2"></i>块级存储模式 (Block-Based Storage)</p>
-                                <p class="text-xs text-blue-600 mt-1">系统将 WebDAV 模拟为一块原始磁盘镜像。你可以像格式化普通硬盘一样对其进行分区和格式化，支持安装任何应用，且不产生 WebDAV 小文件碎片问题。</p>
-                            </div>
-                        </div>
                         <div>
                             <label class="block text-sm font-medium text-slate-700 mb-2">虚拟硬盘名称</label>
-                            <input type="text" id="disk_name" value="data_disk" placeholder="例如: my_disk" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            <input type="text" id="disk_name" oninput="autoFillPaths()" placeholder="my_disk" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-slate-700 mb-2">虚拟磁盘总容量 (GB)</label>
-                            <input type="number" id="disk_size_gb" value="100" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            <input type="number" id="disk_size_gb" value="10" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-slate-700 mb-2">云端分块大小 (MB)</label>
                             <select id="block_size_mb" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                                 <option value="1">1 MB</option>
                                 <option value="2">2 MB</option>
-                                <option value="4" selected>4 MB (推荐)</option>
+                                <option value="4" selected>4 MB</option>
                                 <option value="8">8 MB</option>
                                 <option value="16">16 MB</option>
                             </select>
@@ -184,18 +237,18 @@
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-slate-700 mb-2">最大缓存空间 (GB)</label>
-                            <input type="number" id="max_cache_gb" value="10" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            <input type="number" id="max_cache_gb" value="2" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-2">上传速度限制 (KB/s) <span class="text-xs text-slate-400 font-normal">(0表示不限制)</span></label>
-                            <input type="number" id="upload_limit_kb" value="0" min="0" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" title="0 表示不限制">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">上传速度限制 (KB/s)</label>
+                            <input type="number" id="upload_limit_kb" value="0" min="0" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-2">下载速度限制 (KB/s) <span class="text-xs text-slate-400 font-normal">(0表示不限制)</span></label>
-                            <input type="number" id="download_limit_kb" value="0" min="0" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" title="0 表示不限制">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">下载速度限制 (KB/s)</label>
+                            <input type="number" id="download_limit_kb" value="0" min="0" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-2">Inode 比例 (字节/Inode)</label>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">Inode 比例</label>
                             <select id="inode_ratio" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                                 <option value="4096">4 KB (极多小文件)</option>
                                 <option value="16384">16 KB</option>
@@ -203,36 +256,50 @@
                                 <option value="262144">256 KB</option>
                                 <option value="1048576">1 MB (大文件)</option>
                                 <option value="4194304" selected>4 MB (默认-极快启动)</option>
-                                <option value="16777216">16 MB (超大文件)</option>
-                                <option value="67108864">64 MB (蓝光/视频专用)</option>
                             </select>
-                            <p class="text-[10px] text-slate-500 mt-1">比例越大，启动和格式化越快，但能存的文件数越少。</p>
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-slate-700 mb-2">压缩算法 (Compression)</label>
                             <select id="compression" onchange="updateCompressionLevelUI()" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                                 <option value="none">不压缩 (最高性能)</option>
-                                <option value="zstd" selected>Zstd (推荐-兼顾压缩率与速度)</option>
-                                <option value="lz4">LZ4 (极速-适合弱CPU环境)</option>
+                                <option value="zstd" selected>Zstd (推荐)</option>
+                                <option value="lz4">LZ4 (极速)</option>
                             </select>
-                            <p class="text-[10px] text-slate-500 mt-1">开启压缩可显著减少云端占用和上传流量。</p>
                         </div>
                         <div id="compression_level_div">
-                            <label class="block text-sm font-medium text-slate-700 mb-2">压缩级别 (Level)</label>
-                            <input type="number" id="compression_level" value="3" min="1" max="22" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
-                            <p id="compression_level_hint" class="text-[10px] text-slate-500 mt-1">Zstd 建议 1-22，默认 3。级别越高压缩率越高但 CPU 占用越大。</p>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">压缩级别</label>
+                            <input type="number" id="compression_level" value="3" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            <p id="compression_level_hint" class="text-xs text-slate-400 mt-1"></p>
                         </div>
                         <div class="md:col-span-2">
-                            <label class="block text-sm font-medium text-slate-700 mb-2">WebDAV 保存路径</label>
-                            <input type="text" id="remote_path" value="v_disks/data_disk" placeholder="例如: /backups/disks" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            <div class="flex justify-between items-center p-3 bg-slate-100 rounded-lg">
+                                <div>
+                                    <span class="block text-sm font-bold text-slate-800">自动路径模式</span>
+                                    <span class="block text-xs text-slate-500">根据计算机名和磁盘名自动生成标准化路径</span>
+                                </div>
+                                <label class="switch">
+                                    <input type="checkbox" id="auto_path_mode" checked onchange="toggleAutoPathMode()">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
                         </div>
-                        <div class="md:col-span-2">
-                            <label class="block text-sm font-medium text-slate-700 mb-2">挂载路径 (FUSE 镜像层)</label>
-                            <input type="text" id="mount_path" value="/mnt/v_drive" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+
+                        <!-- WebDAV 保存路径 -->
+                        <div class="md:col-span-2 path-group hidden-path" id="group_remote_path">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">WebDAV 保存路径 (手动控制)</label>
+                            <input type="text" id="remote_path" disabled placeholder="v_disks/计算机名/磁盘名" class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed focus:ring-2 focus:ring-blue-500 outline-none">
                         </div>
-                        <div class="md:col-span-2">
-                            <label class="block text-sm font-medium text-slate-700 mb-2">本地缓存目录</label>
-                            <input type="text" id="cache_dir" value="/var/cache/v_drive" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+
+                        <!-- 挂载路径 -->
+                        <div class="md:col-span-2 path-group hidden-path" id="group_mount_path">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">挂载路径 (手动控制)</label>
+                            <input type="text" id="mount_path" disabled placeholder="/mnt/fuse_mirror/磁盘名" class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+
+                        <!-- 本地缓存目录 -->
+                        <div class="md:col-span-2 path-group hidden-path" id="group_cache_dir">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">本地缓存目录 (手动控制)</label>
+                            <input type="text" id="cache_dir" disabled placeholder="/var/cache/磁盘名" class="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 text-slate-500 cursor-not-allowed focus:ring-2 focus:ring-blue-500 outline-none">
                         </div>
                     </div>
 
@@ -241,10 +308,81 @@
                         <label for="read-only" class="ml-2 text-sm text-slate-600">只读模式 (Read-only)</label>
                     </div>
 
-                    <button type="button" onclick="saveConfig()" class="bg-blue-600 text-white px-8 py-3 rounded-lg hover:bg-blue-700 transition font-medium">
+                    <button type="button" onclick="saveConfig()" class="w-full bg-blue-600 text-white p-4 rounded-lg font-bold hover:bg-blue-700 transition shadow-lg shadow-blue-200">
                         保存并创建磁盘
                     </button>
                 </form>
+            </div>
+        </div>
+
+        <!-- System Tab -->
+        <div id="system" class="tab-content">
+            <h2 class="text-3xl font-bold mb-8 text-slate-800">系统与还原</h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <!-- Computer Identity Section -->
+                <div class="bg-white p-8 rounded-xl shadow-sm border border-slate-100">
+                    <h3 class="text-xl font-bold mb-6 text-slate-800 flex items-center">
+                        <i class="fas fa-desktop mr-3 text-blue-500"></i> 本机标识设置
+                    </h3>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">计算机名称 (变量)</label>
+                            <input type="text" id="system_computer_name" oninput="autoFillPaths()" placeholder="例如: office_pc" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            <p class="text-xs text-slate-500 mt-2">此名称决定了云端存储的基础目录：v_disks/<span class="text-blue-600 font-bold">计算机名称</span>/磁盘名称</p>
+                        </div>
+                        <button onclick="saveSystemConfig()" class="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition font-medium w-full">
+                            保存系统设置
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Restore Section -->
+                <div class="bg-white p-8 rounded-xl shadow-sm border border-slate-100">
+                    <h3 class="text-xl font-bold mb-6 text-slate-800 flex items-center">
+                        <i class="fas fa-cloud-download-alt mr-3 text-green-500"></i> 云端还原与匹配
+                    </h3>
+                    <p class="text-sm text-slate-600 mb-6">如果你是在新设备上安装，或需要找回之前的磁盘配置，请填入 WebDAV 信息以搜索云端已有的计算机目录。</p>
+                    
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-2">WebDAV 地址</label>
+                            <input type="text" id="restore_dav_url" placeholder="https://..." class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-2">用户名</label>
+                                <input type="text" id="restore_dav_user" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-2">密码</label>
+                                <input type="password" id="restore_dav_password" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            </div>
+                        </div>
+                        
+                        <button onclick="fetchExistingComputers()" id="btn_fetch_computers" class="bg-slate-800 text-white px-6 py-2 rounded-lg hover:bg-slate-900 transition font-medium w-full">
+                            <i class="fas fa-search mr-2"></i> 搜索云端计算机
+                        </button>
+
+                        <div id="restore_selection_div" class="hidden pt-4 border-t border-slate-100">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">选择要匹配的云端计算机</label>
+                            <select id="restore_computer_select" onchange="fetchDisksForComputer()" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none mb-4">
+                                <!-- Options will be populated via JS -->
+                            </select>
+                            
+                            <div id="restore_disks_div" class="hidden mb-4">
+                                <label class="block text-sm font-medium text-slate-400 mb-2 uppercase tracking-wider text-[10px] font-bold">在该计算机下发现的磁盘</label>
+                                <div id="restore_disks_list" class="space-y-2">
+                                    <!-- Disks will be listed here -->
+                                </div>
+                            </div>
+
+                            <button onclick="applyRestoreComputer()" class="bg-green-600 text-white px-6 py-2 rounded-lg hover:bg-green-700 transition font-medium w-full">
+                                确认并匹配到此计算机
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -387,46 +525,73 @@
 
     <script>
         function showTab(tabId) {
-            if (tabId === 'settings') {
-                // 手动点击导航栏进入设置，重置表单为创建模式
-                resetSettingsForm();
-                updateCompressionLevelUI();
+            console.log("Switching to tab:", tabId);
+            try {
+                if (tabId === 'settings') {
+                    // 手动点击导航栏进入设置，重置表单为创建模式
+                    resetSettingsForm();
+                    updateCompressionLevelUI();
+                }
+                
+                // Hide all contents
+                document.querySelectorAll('.tab-content').forEach(tab => {
+                    tab.classList.remove('active');
+                });
+                
+                // Show target content
+                const targetTab = document.getElementById(tabId);
+                if (targetTab) {
+                    targetTab.classList.add('active');
+                } else {
+                    console.error("Tab not found:", tabId);
+                }
+                
+                // Update Nav styles
+                document.querySelectorAll('nav a').forEach(link => {
+                    link.classList.remove('bg-slate-800', 'text-blue-400');
+                });
+                
+                const navLink = document.getElementById('nav-' + tabId);
+                if (navLink) {
+                    navLink.classList.add('bg-slate-800', 'text-blue-400');
+                }
+            } catch (e) {
+                console.error("Error in showTab:", e);
             }
-            // Hide all contents
-            document.querySelectorAll('.tab-content').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            // Show target content
-            document.getElementById(tabId).classList.add('active');
-            
-            // Update Nav styles
-            document.querySelectorAll('nav a').forEach(link => {
-                link.classList.remove('bg-slate-800', 'text-blue-400');
-            });
-            document.getElementById('nav-' + tabId).classList.add('bg-slate-800', 'text-blue-400');
         }
 
         function updateCompressionLevelUI() {
-            const algo = document.getElementById('compression').value;
-            const levelDiv = document.getElementById('compression_level_div');
-            const levelInput = document.getElementById('compression_level');
-            const hint = document.getElementById('compression_level_hint');
+            try {
+                const algoEl = document.getElementById('compression');
+                if (!algoEl) return;
+                const algo = algoEl.value;
+                const levelDiv = document.getElementById('compression_level_div');
+                const levelInput = document.getElementById('compression_level');
+                const hint = document.getElementById('compression_level_hint');
 
-            if (algo === 'none') {
-                levelDiv.classList.add('hidden');
-            } else {
-                levelDiv.classList.remove('hidden');
-                if (algo === 'zstd') {
-                    levelInput.min = 1;
-                    levelInput.max = 22;
-                    if (levelInput.value > 22 || levelInput.value < 1) levelInput.value = 3;
-                    hint.textContent = "Zstd 建议 1-22，默认 3。级别越高压缩率越高但 CPU 占用越大。";
-                } else if (algo === 'lz4') {
-                    levelInput.min = 0;
-                    levelInput.max = 16;
-                    if (levelInput.value > 16 || levelInput.value < 0) levelInput.value = 0;
-                    hint.textContent = "LZ4 建议 0-16，默认 0。级别越高压缩率越高但速度越慢。";
+                if (!levelDiv || !levelInput || !hint) {
+                    console.warn("Compression UI elements not found");
+                    return;
                 }
+
+                if (algo === 'none') {
+                    levelDiv.classList.add('hidden');
+                } else {
+                    levelDiv.classList.remove('hidden');
+                    if (algo === 'zstd') {
+                        levelInput.min = 1;
+                        levelInput.max = 22;
+                        if (levelInput.value > 22 || levelInput.value < 1) levelInput.value = 3;
+                        hint.textContent = "Zstd 建议 1-22，默认 3。级别越高压缩率越高但 CPU 占用越大。";
+                    } else if (algo === 'lz4') {
+                        levelInput.min = 0;
+                        levelInput.max = 16;
+                        if (levelInput.value > 16 || levelInput.value < 0) levelInput.value = 0;
+                        hint.textContent = "LZ4 建议 0-16，默认 0。级别越高压缩率越高但速度越慢。";
+                    }
+                }
+            } catch (e) {
+                console.error("Error in updateCompressionLevelUI:", e);
             }
         }
 
@@ -434,7 +599,12 @@
         const API_BASE = window.location.origin;
 
         async function saveConfig() {
-            const config = {
+             const btn = document.querySelector('button[onclick="saveConfig()"]');
+             const originalText = btn.textContent;
+             btn.disabled = true;
+             btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> 正在保存...';
+
+             const config = {
                 dav_url: document.getElementById('dav_url').value,
                 dav_user: document.getElementById('dav_user').value,
                 dav_password: document.getElementById('dav_password').value,
@@ -463,13 +633,20 @@
                     body: JSON.stringify(config)
                 });
                 const result = await response.json();
-                alert(result.message || result.detail);
-                fetchDisks();
-                showTab('dashboard');
-            } catch (e) {
-                alert('保存失败: ' + e);
-            }
-        }
+                 let msg = result.message || result.detail;
+                 if (result.sync_msg) {
+                     msg += "\n\n" + result.sync_msg;
+                 }
+                 alert(msg);
+                 fetchDisks();
+                 showTab('dashboard');
+             } catch (e) {
+                 alert('保存失败: ' + e);
+             } finally {
+                 btn.disabled = false;
+                 btn.textContent = originalText;
+             }
+         }
 
         let lastFetchSuccess = false;
         let isFetching = false;
@@ -749,6 +926,11 @@
          }
 
          async function updateConfig() {
+             const btn = document.querySelector('button[onclick="updateConfig()"]');
+             const originalText = btn.textContent;
+             btn.disabled = true;
+             btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> 正在提交...';
+
              const config = {
                  dav_url: document.getElementById('edit_dav_url').value,
                  dav_user: document.getElementById('edit_dav_user').value,
@@ -777,28 +959,49 @@
                      body: JSON.stringify(config)
                  });
                  const result = await response.json();
-                 alert(result.message || result.detail);
+                 let msg = result.message || result.detail;
+                 if (result.sync_msg) {
+                     msg += "\n\n" + result.sync_msg;
+                 }
+                 alert(msg);
                  closeModal();
                  fetchDisks();
              } catch (e) {
                  alert('更新失败: ' + e);
+             } finally {
+                 btn.disabled = false;
+                 btn.textContent = originalText;
              }
          }
 
          function resetSettingsForm() {
-            // 重置表单并解锁字段
-            const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb', 'inode_ratio', 'compression', 'compression_level', 'driver_mode'];
-            lockedFields.forEach(id => {
-                 const el = document.getElementById(id);
-                 if (el) {
-                     el.disabled = false;
-                     el.classList.remove('bg-slate-50', 'text-slate-500', 'cursor-not-allowed');
-                     el.title = "";
-                 }
-             });
-             const saveBtn = document.querySelector('button[onclick="saveConfig()"]');
-             if (saveBtn) saveBtn.textContent = "保存并创建磁盘";
-             // 清空或恢复默认值（可选）
+            try {
+                // 重置表单并解锁字段
+                const lockedFields = ['disk_name', 'remote_path', 'block_size_mb', 'disk_size_gb', 'inode_ratio', 'compression', 'compression_level', 'driver_mode', 'mount_path', 'cache_dir'];
+                lockedFields.forEach(id => {
+                     const el = document.getElementById(id);
+                     if (el) {
+                         el.disabled = (id === 'remote_path' || id === 'mount_path' || id === 'cache_dir'); // 路径字段默认禁用（由自动填充控制）
+                         if (el.disabled) {
+                             el.classList.add('bg-slate-50', 'text-slate-500', 'cursor-not-allowed');
+                         } else {
+                             el.classList.remove('bg-slate-50', 'text-slate-500', 'cursor-not-allowed');
+                         }
+                         el.title = "";
+                     }
+                 });
+
+                 // 重置手动编辑勾选框
+                 ['manual_remote_path', 'manual_mount_path', 'manual_cache_dir'].forEach(id => {
+                     const el = document.getElementById(id);
+                     if (el) el.checked = false;
+                 });
+
+                 const saveBtn = document.querySelector('button[onclick="saveConfig()"]');
+                 if (saveBtn) saveBtn.textContent = "保存并创建磁盘";
+            } catch (e) {
+                console.error("Error in resetSettingsForm:", e);
+            }
          }
 
         async function unmountDisk(name) {
@@ -838,25 +1041,382 @@
 
         // 加载保存的配置
         function loadConfig() {
-            const saved = localStorage.getItem('v_drive_config');
-            if (saved) {
-                const config = JSON.parse(saved);
-                if (config.dav_url) document.getElementById('dav_url').value = config.dav_url;
-                if (config.dav_user) document.getElementById('dav_user').value = config.dav_user;
-                if (config.dav_password) document.getElementById('dav_password').value = config.dav_password;
-                if (config.mount_path) document.getElementById('mount_path').value = config.mount_path;
-                if (config.cache_dir) document.getElementById('cache_dir').value = config.cache_dir;
-                if (config.disk_name) document.getElementById('disk_name').value = config.disk_name;
-                if (config.remote_path) document.getElementById('remote_path').value = config.remote_path;
-                if (config.block_size_mb) document.getElementById('block_size_mb').value = config.block_size_mb;
-                if (config.disk_size_gb) document.getElementById('disk_size_gb').value = config.disk_size_gb;
-                if (config.max_cache_gb) document.getElementById('max_cache_gb').value = config.max_cache_gb;
-                if (config.concurrency) document.getElementById('concurrency').value = config.concurrency;
-                if (config.compression) {
-                    document.getElementById('compression').value = config.compression;
-                    updateCompressionLevelUI();
+            try {
+                const saved = localStorage.getItem('v_drive_config');
+                if (saved) {
+                    const config = JSON.parse(saved);
+                    const setVal = (id, val) => {
+                        const el = document.getElementById(id);
+                        if (el) {
+                            el.value = val;
+                        } else {
+                            console.warn(`Element not found during loadConfig: ${id}`);
+                        }
+                    };
+
+                    if (config.dav_url) setVal('dav_url', config.dav_url);
+                    if (config.dav_user) setVal('dav_user', config.dav_user);
+                    if (config.dav_password) setVal('dav_password', config.dav_password);
+                    if (config.mount_path) setVal('mount_path', config.mount_path);
+                    if (config.cache_dir) setVal('cache_dir', config.cache_dir);
+                    if (config.disk_name) setVal('disk_name', config.disk_name);
+                    if (config.remote_path) setVal('remote_path', config.remote_path);
+
+                    // 检查加载的配置是否与自动生成的路径不符，如果不符则开启手动模式
+                    setTimeout(() => {
+                        const computerName = document.getElementById('system_computer_name').value.trim();
+                        const diskName = config.disk_name || "";
+                        
+                        if (diskName) {
+                            const expectedRemote = computerName ? `v_disks/${computerName}/${diskName}` : `v_disks/${diskName}`;
+                            const expectedMount = `/mnt/fuse_mirror/${diskName}`;
+                            const expectedCache = `/var/cache/${diskName}`;
+
+                            const isCustom = (config.remote_path && config.remote_path !== expectedRemote) ||
+                                           (config.mount_path && config.mount_path !== expectedMount) ||
+                                           (config.cache_dir && config.cache_dir !== expectedCache);
+
+                            if (isCustom) {
+                                const toggle = document.getElementById('auto_path_mode');
+                                if (toggle) {
+                                    toggle.checked = false;
+                                    toggleAutoPathMode();
+                                }
+                            }
+                        }
+                    }, 500); // 延迟执行确保 system_computer_name 已加载
+                    if (config.block_size_mb) setVal('block_size_mb', config.block_size_mb);
+                    if (config.disk_size_gb) setVal('disk_size_gb', config.disk_size_gb);
+                    if (config.max_cache_gb) setVal('max_cache_gb', config.max_cache_gb);
+                    if (config.concurrency) setVal('concurrency', config.concurrency);
+                    
+                    if (config.compression) {
+                        const el = document.getElementById('compression');
+                        if (el) {
+                            el.value = config.compression;
+                            updateCompressionLevelUI();
+                        }
+                    }
+                    if (config.compression_level) setVal('compression_level', config.compression_level);
                 }
-                if (config.compression_level) document.getElementById('compression_level').value = config.compression_level;
+            } catch (e) {
+                console.error("Error in loadConfig:", e);
+            }
+        }
+
+        function toggleAutoPathMode() {
+            const isAuto = document.getElementById('auto_path_mode').checked;
+            const groups = ['group_remote_path', 'group_mount_path', 'group_cache_dir'];
+            const inputs = ['remote_path', 'mount_path', 'cache_dir'];
+            
+            groups.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    if (isAuto) {
+                        el.classList.add('hidden-path');
+                    } else {
+                        el.classList.remove('hidden-path');
+                    }
+                }
+            });
+
+            // 手动模式下启用输入框，自动模式下禁用以防误触
+            inputs.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.disabled = isAuto;
+                    if (isAuto) {
+                        el.classList.add('bg-slate-50', 'text-slate-500', 'cursor-not-allowed');
+                    } else {
+                        el.classList.remove('bg-slate-50', 'text-slate-500', 'cursor-not-allowed');
+                    }
+                }
+            });
+            
+            // 切换模式时重新填充一次
+            if (isAuto) {
+                autoFillPaths();
+            }
+        }
+
+        // 自动填充路径逻辑
+        function autoFillPaths() {
+            try {
+                const isAuto = document.getElementById('auto_path_mode').checked;
+                // 如果不是自动模式，则不自动填充，保留用户输入
+                if (!isAuto) return;
+
+                const computerNameEl = document.getElementById('system_computer_name');
+                const diskNameEl = document.getElementById('disk_name');
+                const remotePathEl = document.getElementById('remote_path');
+                const mountPathEl = document.getElementById('mount_path');
+                const cacheDirEl = document.getElementById('cache_dir');
+
+                if (!diskNameEl || !remotePathEl || !mountPathEl || !cacheDirEl) return;
+
+                const computerName = computerNameEl ? computerNameEl.value.trim() : "";
+                const diskName = diskNameEl.value.trim();
+                
+                if (diskName) {
+                    // WebDAV 保存路径：v_disks/计算机名/虚拟硬盘名
+                    const remotePath = computerName ? `v_disks/${computerName}/${diskName}` : `v_disks/${diskName}`;
+                    remotePathEl.value = remotePath;
+                    
+                    // 挂载路径 (FUSE 镜像层)：/mnt/fuse_mirror/虚拟硬盘名
+                    mountPathEl.value = `/mnt/fuse_mirror/${diskName}`;
+                    
+                    // 本地缓存目录:/var/cache/虚拟硬盘名
+                    cacheDirEl.value = `/var/cache/${diskName}`;
+                }
+            } catch (e) {
+                console.error("Error in autoFillPaths:", e);
+            }
+        }
+
+        function toggleManualPath(fieldId) {
+            // 此函数已弃用，功能由 toggleAutoPathMode 统一处理
+        }
+
+        // 系统配置与还原逻辑
+        async function fetchSystemConfig() {
+            try {
+                const res = await fetch(`${API_BASE}/api/system/config`);
+                const config = await res.json();
+                document.getElementById('system_computer_name').value = config.computer_name || "";
+            } catch (e) {
+                console.error("加载系统配置失败:", e);
+            }
+        }
+
+        async function saveSystemConfig() {
+            const name = document.getElementById('system_computer_name').value.trim();
+            if (!name) {
+                alert("请输入计算机名称");
+                return;
+            }
+            try {
+                const res = await fetch(`${API_BASE}/api/system/config`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ computer_name: name })
+                });
+                const result = await res.json();
+                alert(result.message || "系统设置已保存");
+            } catch (e) {
+                alert("保存失败: " + e);
+            }
+        }
+
+        async function fetchExistingComputers() {
+            const url = document.getElementById('restore_dav_url').value.trim();
+            const user = document.getElementById('restore_dav_user').value.trim();
+            const pass = document.getElementById('restore_dav_password').value.trim();
+
+            if (!url || !user || !pass) {
+                alert("请完整填写 WebDAV 地址、用户名和密码");
+                return;
+            }
+
+            const btn = document.getElementById('btn_fetch_computers');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> 正在搜索...';
+
+            try {
+                const res = await fetch(`${API_BASE}/api/webdav/list_computers`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        dav_url: url,
+                        dav_user: user,
+                        dav_password: pass
+                    })
+                });
+
+                if (!res.ok) {
+                    const error = await res.json();
+                    throw new Error(error.detail || "搜索失败");
+                }
+
+                const computers = await res.json();
+                const select = document.getElementById('restore_computer_select');
+                select.innerHTML = '';
+                
+                if (computers.length === 0) {
+                    alert("云端未发现任何计算机目录 (v_disks/ 下为空)");
+                    document.getElementById('restore_selection_div').classList.add('hidden');
+                } else {
+                    computers.forEach(comp => {
+                        const opt = document.createElement('option');
+                        opt.value = comp;
+                        opt.textContent = comp;
+                        select.appendChild(opt);
+                    });
+                    document.getElementById('restore_selection_div').classList.remove('hidden');
+                    fetchDisksForComputer(); // 默认获取第一个计算机的磁盘
+                }
+            } catch (e) {
+                alert("搜索出错: " + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-search mr-2"></i> 搜索云端计算机';
+            }
+        }
+
+        async function fetchDisksForComputer() {
+            const url = document.getElementById('restore_dav_url').value.trim();
+            const user = document.getElementById('restore_dav_user').value.trim();
+            const pass = document.getElementById('restore_dav_password').value.trim();
+            const computer = document.getElementById('restore_computer_select').value;
+
+            if (!computer) return;
+
+            const listDiv = document.getElementById('restore_disks_list');
+            listDiv.innerHTML = '<div class="text-xs text-slate-400">正在获取磁盘列表...</div>';
+            document.getElementById('restore_disks_div').classList.remove('hidden');
+
+            try {
+                const res = await fetch(`${API_BASE}/api/webdav/list_disks`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        dav_url: url,
+                        dav_user: user,
+                        dav_password: pass,
+                        computer_name: computer
+                    })
+                });
+
+                const disks = await res.json();
+                listDiv.innerHTML = '';
+                
+                if (disks.length === 0) {
+                    listDiv.innerHTML = '<div class="text-xs text-slate-400 italic">该计算机下暂无磁盘</div>';
+                } else {
+                        disks.forEach(diskObj => {
+                             const disk = diskObj.name;
+                             const hasConfig = diskObj.has_config;
+                             const item = document.createElement('div');
+                             item.className = 'flex items-center justify-between p-2 bg-slate-50 rounded border border-slate-100 text-sm';
+                             item.innerHTML = `
+                                 <div class="flex flex-col">
+                                     <span class="font-medium text-slate-700"><i class="fas fa-hdd mr-2 text-slate-400"></i>${disk}</span>
+                                     ${hasConfig ? 
+                                         `<span class="text-[10px] text-green-600 font-bold ml-6"><i class="fas fa-file-code mr-1"></i>检测到云端配置 (可全量恢复)</span>` : 
+                                         `<span class="text-[10px] text-amber-600 ml-6"><i class="fas fa-folder-open mr-1"></i>仅检测到数据文件夹</span>`
+                                     }
+                                 </div>
+                                 <button onclick="prefillDiskRestore('${disk}')" class="bg-blue-600 text-white px-3 py-1 rounded text-xs font-bold hover:bg-blue-700 transition">
+                                     ${hasConfig ? '一键恢复' : '手动恢复'}
+                                 </button>
+                             `;
+                             listDiv.appendChild(item);
+                         });
+                }
+            } catch (e) {
+                listDiv.innerHTML = `<div class="text-xs text-red-500">获取磁盘失败: ${e.message}</div>`;
+            }
+        }
+
+        async function prefillDiskRestore(diskName) {
+            const url = document.getElementById('restore_dav_url').value.trim();
+            const user = document.getElementById('restore_dav_user').value.trim();
+            const pass = document.getElementById('restore_dav_password').value.trim();
+            const computer = document.getElementById('restore_computer_select').value;
+
+            // 基础填充
+            document.getElementById('dav_url').value = url;
+            document.getElementById('dav_user').value = user;
+            document.getElementById('dav_password').value = pass;
+            document.getElementById('disk_name').value = diskName;
+            
+            // 尝试从云端获取详细配置
+            try {
+                const res = await fetch(`${API_BASE}/api/webdav/get_disk_config`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        dav_url: url,
+                        dav_user: user,
+                        dav_password: pass,
+                        computer_name: computer,
+                        disk_name: diskName
+                    })
+                });
+                const result = await res.json();
+                if (result.status === 'ok' && result.config) {
+                    const cfg = result.config;
+                    // 填充详细参数
+                    if (cfg.block_size_mb) document.getElementById('block_size_mb').value = cfg.block_size_mb;
+                    if (cfg.disk_size_gb) document.getElementById('disk_size_gb').value = cfg.disk_size_gb;
+                    if (cfg.max_cache_gb) document.getElementById('max_cache_gb').value = cfg.max_cache_gb;
+                    if (cfg.concurrency) document.getElementById('concurrency').value = cfg.concurrency;
+                    if (cfg.inode_ratio) document.getElementById('inode_ratio').value = cfg.inode_ratio;
+                    if (cfg.compression) {
+                        document.getElementById('compression').value = cfg.compression;
+                        updateCompressionLevelUI();
+                    }
+                    if (cfg.compression_level) document.getElementById('compression_level').value = cfg.compression_level;
+                    if (cfg.driver_mode) document.getElementById('driver_mode').value = cfg.driver_mode;
+                    if (cfg.upload_limit_kb) document.getElementById('upload_limit_kb').value = cfg.upload_limit_kb;
+                    if (cfg.download_limit_kb) document.getElementById('download_limit_kb').value = cfg.download_limit_kb;
+                    if (cfg.read_only !== undefined) document.getElementById('read-only').checked = cfg.read_only;
+                    
+                    // 检查路径是否是自定义的
+                    const expectedRemote = `v_disks/${computer}/${diskName}`;
+                    const expectedMount = `/mnt/fuse_mirror/${diskName}`;
+                    const expectedCache = `/var/cache/${diskName}`;
+                    
+                    const isCustom = (cfg.remote_path && cfg.remote_path !== expectedRemote) ||
+                                   (cfg.mount_path && cfg.mount_path !== expectedMount) ||
+                                   (cfg.cache_dir && cfg.cache_dir !== expectedCache);
+                    
+                    if (isCustom) {
+                        const toggle = document.getElementById('auto_path_mode');
+                        toggle.checked = false;
+                        toggleAutoPathMode();
+                        if (cfg.remote_path) document.getElementById('remote_path').value = cfg.remote_path;
+                        if (cfg.mount_path) document.getElementById('mount_path').value = cfg.mount_path;
+                        if (cfg.cache_dir) document.getElementById('cache_dir').value = cfg.cache_dir;
+                    } else {
+                        const toggle = document.getElementById('auto_path_mode');
+                        toggle.checked = true;
+                        toggleAutoPathMode();
+                        autoFillPaths();
+                    }
+                    
+                    console.log("Successfully loaded cloud config for disk:", diskName);
+                } else {
+                    console.warn("Cloud config not found, using defaults");
+                    autoFillPaths();
+                }
+            } catch (e) {
+                console.error("Failed to fetch cloud config:", e);
+                autoFillPaths();
+            }
+            
+            // 自动跳转到新增磁盘标签
+            showTab('settings');
+            alert(`已为您从云端加载并填充磁盘 "${diskName}" 的完整配置。请检查并点击“保存并创建磁盘”来完成恢复。`);
+        }
+
+        async function applyRestoreComputer() {
+            const selected = document.getElementById('restore_computer_select').value;
+            if (!selected) return;
+
+            if (confirm(`确定要将本机标识设置为 "${selected}" 吗？\n这将允许您连接并恢复该计算机名下的所有磁盘。`)) {
+                document.getElementById('system_computer_name').value = selected;
+                await saveSystemConfig();
+                
+                // 同时自动填充到“新增磁盘”页面的 WebDAV 信息中，方便用户接下来的操作
+                document.getElementById('dav_url').value = document.getElementById('restore_dav_url').value;
+                document.getElementById('dav_user').value = document.getElementById('restore_dav_user').value;
+                document.getElementById('dav_password').value = document.getElementById('restore_dav_password').value;
+                
+                // 触发路径自动填充（以防万一 disk_name 已经有值）
+                autoFillPaths();
+                
+                alert("本机标识已更新。您现在可以在“新增磁盘”中填入磁盘名称来恢复之前的磁盘了。");
+                showTab('dashboard');
             }
         }
 
@@ -868,6 +1428,7 @@
         
         startPolling();
         loadConfig();
+        fetchSystemConfig();
     </script>
 </body>
 </html>
