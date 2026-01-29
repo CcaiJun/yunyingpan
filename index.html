@@ -524,6 +524,7 @@
     </div>
 
     <script>
+        console.log("Virtual Drive Console Loaded - Version: 2026-01-29 16:30");
         function showTab(tabId) {
             console.log("Switching to tab:", tabId);
             try {
@@ -863,7 +864,7 @@
                     
                     <div class="disk-actions mt-auto pt-2 border-t border-slate-100">
                         ${disk.status === 'running' ? 
-                            `<button onclick="unmountDisk(event, '${disk.disk_name}')" class="bg-slate-500 text-white px-3 py-1.5 rounded text-sm hover:bg-slate-600 transition flex-1">卸载</button>` :
+                            `<button onclick="handleUnmountRequest(event, '${disk.disk_name}')" class="bg-slate-500 text-white px-3 py-1.5 rounded text-sm hover:bg-slate-600 transition flex-1">卸载</button>` :
                             `<button onclick="mountDisk('${disk.disk_name}')" class="bg-blue-600 text-white px-3 py-1.5 rounded text-sm hover:bg-blue-700 transition flex-1" ${disk.status === 'starting' ? 'disabled style="opacity:0.5; cursor:not-allowed;"' : ''}>${disk.status === 'starting' ? '启动中' : '启动'}</button>`
                         }
                         <button onclick="editDisk('${disk.disk_name}')" class="border border-slate-200 px-3 py-1.5 rounded text-sm hover:bg-slate-50 transition">配置</button>
@@ -1017,21 +1018,34 @@
             }
          }
 
-        async function unmountDisk(event, name) {
+        let isConfirming = false;
+
+        async function handleUnmountRequest(event, name) {
             if (event) {
                 event.preventDefault();
                 event.stopPropagation();
             }
-            
-            if (!window.confirm(`确定要卸载磁盘 ${name} 吗？`)) return;
-            
+
+            if (isConfirming) return;
+            isConfirming = true;
+
             try {
+                // 第一层确认
+                const first = window.confirm(`【卸载确认】\n您确定要卸载磁盘 "${name}" 吗？`);
+                if (!first) return;
+
+                // 第二层确认
+                const second = window.confirm(`【安全警告】\n卸载操作将强制断开连接。如果有正在进行的文件操作，可能会导致数据丢失。\n\n确定要强制卸载吗？`);
+                if (!second) return;
+
                 const res = await fetch(`${API_BASE}/unmount/${encodeURIComponent(name)}`, { method: 'POST' });
                 const data = await res.json();
                 alert(data.message || data.detail);
                 fetchDisks();
             } catch (err) {
                 alert("卸载失败: " + err);
+            } finally {
+                isConfirming = false;
             }
         }
 
