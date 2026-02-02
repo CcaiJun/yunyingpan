@@ -1,7 +1,7 @@
 {
   "dav_url": "https://webdav.123pan.cn/webdav",
-  "dav_user": "18096322625",
-  "dav_password": "1i8ngve1000d6mkd3sim2441ytnuss2v",
+  "dav_user": "user",
+  "dav_password": "key",
   "mount_path": "/mnt/fuse_mirror/VCP",
   "cache_dir": "/var/cache/VCP",
   "disk_size_gb": 20,
