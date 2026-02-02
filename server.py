@@ -245,7 +245,7 @@ def do_mount(inst: DiskInstance):
             
             # 等待 FUSE 镜像文件出现
             inst.startup_progress = 30
-            max_wait = 60
+            max_wait = 300
             while max_wait > 0 and not os.path.exists(target_path):
                 if not inst.thread.is_alive():
                     if inst.instance_version == current_version:
@@ -426,7 +426,7 @@ def do_mount(inst: DiskInstance):
 
         inst.startup_progress = 75
         try:
-            res = subprocess.run(['blkid', target_path], capture_output=True, text=True, timeout=30)
+            res = subprocess.run(['blkid', target_path], capture_output=True, text=True, timeout=120)
             if "TYPE=" in res.stdout: 
                 needs_format = False
                 logger.info(f"Disk {cfg.disk_name} already has a filesystem: {res.stdout.strip()}")
@@ -441,7 +441,7 @@ def do_mount(inst: DiskInstance):
             try:
                 subprocess.run(['mkfs.ext4', '-F', '-i', str(cfg.inode_ratio), '-b', '4096', 
                               '-O', '^metadata_csum', '-E', 'lazy_itable_init=1,lazy_journal_init=1', target_path], 
-                              check=True, timeout=60)
+                              check=True, timeout=600)
             except subprocess.TimeoutExpired:
                 logger.error(f"mkfs.ext4 timed out for {target_path}")
                 raise Exception("格式化磁盘超时，可能存在 I/O 阻塞")
