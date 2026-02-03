@@ -93,6 +93,8 @@ class DiskInstance:
         self.total_inodes = 0
         self.startup_progress = 0
         self.instance_version = 0 # 增加版本号，用于区分不同的启动生命周期
+        self.init_progress = None # 初始化（扩容）进度：0-100，None表示未进行
+        self.init_status = "" # 初始化状态描述
 
 def load_configs() -> List[dict]:
     if os.path.exists(CONFIG_FILE):
@@ -438,10 +440,20 @@ def do_mount(inst: DiskInstance):
         inst.startup_progress = 85
         if needs_format and not has_remote:
             logger.info(f"Formatting {target_path}...")
+            is_fast_format = False
             try:
-                subprocess.run(['mkfs.ext4', '-F', '-i', str(cfg.inode_ratio), '-b', '4096', 
-                              '-O', '^metadata_csum', '-E', 'lazy_itable_init=1,lazy_journal_init=1', target_path], 
-                              check=True, timeout=600)
+                # 显式使用 -E nodiscard 避免 TRIM 操作导致 NBD 超时
+                # 快速格式化策略：如果磁盘大于 10GB，先格式化为 1GB，挂载后再扩容
+                # 这样可以避免 mkfs 初始化海量 inode 表时的漫长等待
+                mkfs_cmd = ['mkfs.ext4', '-F', '-i', str(cfg.inode_ratio), '-b', '4096', 
+                              '-O', '^metadata_csum', '-E', 'lazy_itable_init=1,lazy_journal_init=1,nodiscard', target_path]
+                
+                if cfg.disk_size_gb >= 10:
+                    logger.info(f"Using fast format strategy (initial 1GB) for {cfg.disk_name}")
+                    mkfs_cmd.append('1G')
+                    is_fast_format = True
+                
+                subprocess.run(mkfs_cmd, check=True, timeout=600)
             except subprocess.TimeoutExpired:
                 logger.error(f"mkfs.ext4 timed out for {target_path}")
                 raise Exception("格式化磁盘超时，可能存在 I/O 阻塞")
@@ -473,6 +485,63 @@ def do_mount(inst: DiskInstance):
         inst.startup_progress = 100
         inst.status = "running"
         logger.info(f"Disk {cfg.disk_name} started in {cfg.driver_mode} mode")
+        
+        # 启动后台扩容任务（如果是快速格式化）
+        if locals().get('is_fast_format', False):
+            def resize_task():
+                import time
+                inst.init_progress = 0
+                inst.init_status = "Wait"
+                time.sleep(5) # 等待系统稳定
+                try:
+                    logger.info(f"Starting online resize for {cfg.disk_name}...")
+                    inst.init_status = "Locating"
+                    # 查找挂载点对应的设备
+                    find_cmd = ['findmnt', '-n', '-o', 'SOURCE', '-T', inst.final_mountpoint]
+                    res = subprocess.run(find_cmd, capture_output=True, text=True)
+                    device = res.stdout.strip()
+                    
+                    if device:
+                        logger.info(f"Resizing device {device} for {cfg.disk_name}")
+                        inst.init_status = "Resizing"
+                        
+                        # 启动 resize2fs
+                        proc = subprocess.Popen(['resize2fs', device], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        
+                        # 监控循环
+                        target_size_bytes = cfg.disk_size_gb * 1024 * 1024 * 1024
+                        while proc.poll() is None:
+                            try:
+                                st = os.statvfs(inst.final_mountpoint)
+                                current_size_bytes = st.f_blocks * st.f_frsize
+                                # 初始是 1GB，目标是 target
+                                # 进度计算： (curr - 1G) / (target - 1G)
+                                # 简化计算，直接用占比
+                                progress = min(99, int((current_size_bytes / target_size_bytes) * 100))
+                                inst.init_progress = progress
+                            except: pass
+                            time.sleep(1)
+                            
+                        # 检查结果
+                        if proc.returncode == 0:
+                            logger.info(f"Online resize completed for {cfg.disk_name}")
+                            inst.init_progress = 100
+                            inst.init_status = "Done"
+                            time.sleep(2) # 展示一会儿完成状态
+                            inst.init_progress = None # 隐藏进度条
+                        else:
+                            stderr = proc.stderr.read().decode()
+                            logger.error(f"Resize failed: {stderr}")
+                            inst.init_status = "Error"
+                            # 保持错误状态供用户查看
+                    else:
+                        logger.warning(f"Could not find device for {inst.final_mountpoint}, skipping resize")
+                        inst.init_progress = None
+                except Exception as e:
+                    logger.error(f"Resize failed for {cfg.disk_name}: {e}")
+                    inst.init_status = "Error"
+            
+            threading.Thread(target=resize_task, daemon=True).start()
 
     except Exception as e:
         import traceback
@@ -761,7 +830,9 @@ async def list_disks():
             "total_inodes": instance.total_inodes,
             "error_msg": instance.error_msg,
             "final_mountpoint": instance.final_mountpoint,
-            "startup_progress": instance.startup_progress
+            "startup_progress": instance.startup_progress,
+            "init_progress": instance.init_progress,
+            "init_status": instance.init_status
         })
     
     duration = time.time() - start_time

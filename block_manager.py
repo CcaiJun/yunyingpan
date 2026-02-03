@@ -578,18 +578,10 @@ class BlockManager:
                 else:
                     with open(block_path, 'wb') as f: 
                         f.truncate(self.block_size)
-                        f.flush()
-                        try: os.fsync(f.fileno())
-                        except: pass
             try:
                 with open(block_path, 'r+b') as f:
                     f.seek(block_offset)
                     f.write(buf[bytes_written:bytes_written+chunk_len])
-                    f.flush()
-                    try:
-                        os.fsync(f.fileno())
-                    except:
-                        pass
             except Exception as e:
                 logger.error(f"Write to block file {block_id} failed: {e}")
                 raise e

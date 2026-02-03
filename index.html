@@ -217,12 +217,14 @@
                         <div>
                             <label class="block text-sm font-medium text-slate-700 mb-2">云端分块大小 (MB)</label>
                             <select id="block_size_mb" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
-                                <option value="1">1 MB</option>
-                                <option value="2">2 MB</option>
-                                <option value="4" selected>4 MB</option>
-                                <option value="8">8 MB</option>
-                                <option value="16">16 MB</option>
-                            </select>
+                            <option value="1">1 MB</option>
+                            <option value="2">2 MB</option>
+                            <option value="4" selected>4 MB</option>
+                            <option value="8">8 MB</option>
+                            <option value="16">16 MB</option>
+                            <option value="32">32 MB</option>
+                            <option value="64">64 MB</option>
+                        </select>
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-slate-700 mb-2">驱动模式 (Driver Mode)</label>
@@ -250,13 +252,15 @@
                         <div>
                             <label class="block text-sm font-medium text-slate-700 mb-2">Inode 比例</label>
                             <select id="inode_ratio" class="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
-                                <option value="4096">4 KB (极多小文件)</option>
-                                <option value="16384">16 KB</option>
-                                <option value="65536">64 KB</option>
-                                <option value="262144">256 KB</option>
-                                <option value="1048576">1 MB (大文件)</option>
-                                <option value="4194304" selected>4 MB (默认-极快启动)</option>
-                            </select>
+                            <option value="4096">4 KB (极多小文件)</option>
+                            <option value="16384">16 KB</option>
+                            <option value="65536">64 KB</option>
+                            <option value="262144">256 KB</option>
+                            <option value="1048576">1 MB (大文件)</option>
+                            <option value="4194304" selected>4 MB (默认-极快启动)</option>
+                            <option value="8388608">8 MB</option>
+                            <option value="16777216">16 MB</option>
+                        </select>
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-slate-700 mb-2">压缩算法 (Compression)</label>
@@ -791,6 +795,21 @@
                         </div>
                         <div class="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden border border-slate-200">
                             <div class="bg-blue-500 h-full transition-all duration-500 ease-out shadow-[0_0_8px_rgba(59,130,246,0.5)]" style="width: ${disk.startup_progress || 0}%"></div>
+                        </div>
+                    </div>
+                    ` : ''}
+
+                    <!-- 扩容初始化进度条 (仅在扩容中显示) -->
+                    ${disk.init_progress !== null && disk.init_progress !== undefined ? `
+                    <div class="mb-4">
+                        <div class="flex justify-between items-center mb-1">
+                            <span class="text-[10px] text-purple-600 font-bold uppercase tracking-wider">
+                                <i class="fas fa-expand-arrows-alt mr-1"></i>${disk.init_status || '文件系统扩容中'}
+                            </span>
+                            <span class="text-[10px] text-purple-600 font-mono font-bold">${Math.round(disk.init_progress || 0)}%</span>
+                        </div>
+                        <div class="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden border border-slate-200">
+                            <div class="bg-purple-500 h-full transition-all duration-500 ease-out shadow-[0_0_8px_rgba(168,85,247,0.5)]" style="width: ${disk.init_progress || 0}%"></div>
                         </div>
                     </div>
                     ` : ''}
