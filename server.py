@@ -471,18 +471,21 @@ def do_mount(inst: DiskInstance):
                 logger.info(f"Path {inst.final_mountpoint} already mounted, skipping mount command.")
             else:
                 try:
-                    subprocess.run(mount_cmd, check=True, timeout=120)
+                    # 增加超时时间到 300s (5分钟)，防止因网络慢或元数据下载多而超时
+                    subprocess.run(mount_cmd, check=True, timeout=300)
                 except subprocess.CalledProcessError as e:
                     if e.returncode == 32:
                         logger.warning("Mount failed with structure error, attempting fsck repair...")
                         # 尝试自动修复
                         subprocess.run(['fsck.ext4', '-y', nbd_dev], check=False)
                         # 修复后重试挂载
-                        subprocess.run(mount_cmd, check=True, timeout=120)
+                        subprocess.run(mount_cmd, check=True, timeout=300)
                     else:
                         raise e
         except subprocess.TimeoutExpired:
             logger.error(f"Mount command timed out (Version {current_version}): {' '.join(mount_cmd)}")
+            inst.status = "error" # 显式设置状态
+            inst.error_msg = "挂载磁盘超时，可能是因为正在从云端下载大量元数据，请耐心等待或重试"
             raise Exception("挂载磁盘超时，可能是因为正在从云端下载大量元数据，请耐心等待或重试")
         except subprocess.CalledProcessError as e:
             # 如果报错信息包含 "already mounted"，视为成功
@@ -490,6 +493,8 @@ def do_mount(inst: DiskInstance):
                 logger.info(f"Mount reported 'already mounted', treating as success (Version {current_version})")
             else:
                 logger.error(f"Mount command failed (Version {current_version}): {e}")
+                inst.status = "error" # 显式设置状态
+                inst.error_msg = f"挂载失败: {e}"
                 raise Exception(f"挂载失败: {e}")
         
         inst.startup_progress = 100
@@ -592,21 +597,16 @@ for cfg_dict in load_configs():
         instance = DiskInstance(cfg)
         
         # 自动检测是否已经在运行
+        # 注意：对于依赖本进程服务的挂载（FUSE/NBD），应用重启意味着服务已停止，
+        # 现有的挂载点即使存在也是失效的（Stale），因此不应标记为 running，
+        # 而应保持 stopped 状态，让 auto_mount_all 触发重新挂载（包含清理逻辑）。
         if os.path.ismount(instance.final_mountpoint):
-            # 检查 FUSE 挂载点是否正常
+            logger.warning(f"Detected stale mount for disk {cfg.disk_name} (Service restarted), will re-mount.")
+            # 尝试做一次简单的卸载，虽然 do_mount 也会做，但这里清理一下更干净
             try:
-                os.stat(instance.config.mount_path)
-                instance.status = "running"
-                logger.info(f"Detected existing healthy mount for disk {cfg.disk_name}, setting status to running")
-            except:
-                logger.warning(f"Detected broken FUSE mount for disk {cfg.disk_name}, setting status to error")
-                instance.status = "error"
-                instance.error_msg = "FUSE 层连接断开 (Transport endpoint not connected)"
-        elif os.path.ismount(instance.config.mount_path):
-            # FUSE 还在但 Loop 不在，可能是异常退出
-            logger.warning(f"Detected partial mount for disk {cfg.disk_name} (FUSE ok, Loop missing)")
-            instance.status = "error"
-            instance.error_msg = "检测到残留挂载，请先卸载或重启"
+                import subprocess
+                subprocess.run(['umount', '-l', instance.final_mountpoint], check=False)
+            except: pass
         
         disks[cfg.disk_name] = instance
     except:

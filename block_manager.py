@@ -121,7 +121,9 @@ class MetadataDB:
 
     def get_lru_blocks(self, limit):
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute('SELECT block_id FROM blocks WHERE status = "cached" ORDER BY last_access ASC LIMIT ?', (limit,))
+            # 增加保护：不删除最近 60 秒内访问过的块，防止误删刚下载或正在使用的块
+            cutoff_time = time.time() - 60
+            cursor = conn.execute('SELECT block_id FROM blocks WHERE status = "cached" AND last_access < ? ORDER BY last_access ASC LIMIT ?', (cutoff_time, limit))
             return [row[0] for row in cursor.fetchall()]
 
     def get_dirty_blocks(self):
@@ -137,6 +139,21 @@ class MetadataDB:
     def touch_block(self, block_id):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute('UPDATE blocks SET last_access = ? WHERE block_id = ?', (time.time(), block_id))
+            conn.commit()
+
+    def batch_set_block_status(self, block_ids, status, remote_exists=None):
+        """批量更新块状态，优化清理性能"""
+        if not block_ids:
+            return
+        with sqlite3.connect(self.db_path) as conn:
+            if remote_exists is not None:
+                conn.executemany('INSERT OR REPLACE INTO blocks (block_id, status, remote_exists, last_access) VALUES (?, ?, ?, ?)',
+                            [(bid, status, remote_exists, time.time()) for bid in block_ids])
+            else:
+                conn.executemany('''
+                    INSERT INTO blocks (block_id, status, last_access) VALUES (?, ?, ?)
+                    ON CONFLICT(block_id) DO UPDATE SET status=excluded.status, last_access=excluded.last_access
+                ''', [(bid, status, time.time()) for bid in block_ids])
             conn.commit()
 
 class BlockManager:
@@ -420,45 +437,70 @@ class BlockManager:
             time.sleep(0.1)
 
     def _cache_worker(self):
+        logger.info(f"Cache worker started for {self.img_name}, limit={self.max_cache_size/1024/1024:.1f}MB")
         while True:
             try:
+                # logger.debug("Cache worker cycle check...") 
                 current_real_size = 0
-                block_files = [f for f in os.listdir(self.cache_dir) if f.startswith(f"{self.img_name}_blk_")]
-                for f in block_files:
-                    try:
-                        f_path = os.path.join(self.cache_dir, f)
-                        stat_info = os.stat(f_path)
-                        f_real_size = stat_info.st_blocks * 512
-                        if f_real_size > 0 and self._is_all_zeros(f_path):
-                            with open(f_path, 'wb') as f_obj: f_obj.truncate(self.block_size)
-                            f_real_size = 0
-                        current_real_size += f_real_size
-                    except: pass
+                # 优化：使用 scandir 替代 listdir + stat，提高性能
+                with os.scandir(self.cache_dir) as it:
+                    for entry in it:
+                        if entry.name.startswith(f"{self.img_name}_blk_") and entry.is_file():
+                            try:
+                                stat_info = entry.stat()
+                                f_real_size = stat_info.st_blocks * 512
+                                # 移除高频的全 0 检查，避免产生巨大的读 IO
+                                current_real_size += f_real_size
+                            except: pass
+                
                 if current_real_size > self.max_cache_size:
                     over_size = current_real_size - self.max_cache_size
-                    # 估算需要删除的块数 (每块 block_size)
-                    blocks_to_delete = (over_size // self.block_size) + 5 
-                    # 每次清理至少 20 块，最多 500 块，防止单次清理时间过长
-                    blocks_to_delete = max(20, min(blocks_to_delete, 500))
+                    logger.info(f"Cache over limit ({current_real_size/1024/1024:.1f}MB > {self.max_cache_size/1024/1024:.1f}MB), need to free {over_size/1024/1024:.1f}MB")
                     
-                    logger.info(f"Cache over limit ({current_real_size/1024/1024:.1f}MB > {self.max_cache_size/1024/1024:.1f}MB), deleting {blocks_to_delete} blocks")
+                    freed_size = 0
+                    total_deleted_count = 0
+                    max_delete_limit = 2000 # 单次最大清理文件数，防止阻塞太久
                     
-                    lru_blocks = self.db.get_lru_blocks(blocks_to_delete)
-                    for bid in lru_blocks:
-                        path = self._get_block_path(bid)
-                        if os.path.exists(path):
-                            try:
-                                os.remove(path)
-                                self.db.set_block_status(bid, 'empty')
-                            except Exception as e:
-                                logger.error(f"Failed to remove cache block {bid}: {e}")
+                    while freed_size < over_size and total_deleted_count < max_delete_limit:
+                        # 每次取 50 个块进行处理
+                        lru_blocks = self.db.get_lru_blocks(50)
+                        if not lru_blocks:
+                            logger.warning("Cache over limit but no cached blocks found in DB (possible sync issue)")
+                            break
+                        
+                        batch_deleted_ids = []
+                        for bid in lru_blocks:
+                            path = self._get_block_path(bid)
+                            real_size = 0
+                            if os.path.exists(path):
+                                try:
+                                    stat_info = os.stat(path)
+                                    real_size = stat_info.st_blocks * 512
+                                    os.remove(path)
+                                except Exception as e:
+                                    logger.error(f"Failed to remove cache block {bid}: {e}")
+                            
+                            # 无论文件是否存在（可能已经被手动删了），都标记为从缓存清除
+                            freed_size += real_size
+                            batch_deleted_ids.append(bid)
+                            
+                            if freed_size >= over_size:
+                                break
+                        
+                        if batch_deleted_ids:
+                            # 批量更新 DB，这会使 get_lru_blocks 在下一次迭代返回新的块
+                            self.db.batch_set_block_status(batch_deleted_ids, 'empty')
+                            total_deleted_count += len(batch_deleted_ids)
+                        else:
+                            break # 防止死循环
+
+                    logger.info(f"Cache cleanup finished: freed {freed_size/1024/1024:.1f}MB, deleted {total_deleted_count} blocks")
                 
                 # 即使没有超过限制，也要休息一下，避免 100% CPU 占用
                 time.sleep(10)
             except Exception as e:
                 logger.error(f"Cache worker error: {e}")
                 time.sleep(10)
-            # 删掉多余的 time.sleep(60)，统一使用上面的 sleep
 
     def read(self, length, offset):
         result = bytearray(length)
@@ -471,6 +513,12 @@ class BlockManager:
             block_path = self._get_block_path(block_id)
             status, remote_exists = self.db.get_block_info(block_id)
             if not os.path.exists(block_path):
+                # 优化：如果远程扫描已完成，且数据库显示远程不存在，直接返回全0，避免大量 404 请求
+                if self._remote_dirs_checked and not remote_exists and status != 'uploading':
+                    result[bytes_read:bytes_read+chunk_len] = b'\x00' * chunk_len
+                    bytes_read += chunk_len
+                    continue
+
                 # 优化策略：不进行预先检查，直接尝试下载
                 # 这样可以减少一次 PROPFIND 请求 (RTT)，如果文件不存在，下载会返回 404
                 if self.use_remote:
@@ -492,17 +540,8 @@ class BlockManager:
                                 last_transferred = transferred
                             
                             if self.compression == "none":
-                                # 直接使用底层的 httpx client 发起 GET 请求，避免 webdav4 的 download_file 触发额外的 PROPFIND
-                                with self.client.http.stream("GET", f"{self.remote_path}/blk_{block_id:08d}.dat", follow_redirects=True) as response:
-                                    if response.status_code == 404:
-                                        raise Exception("404 Not Found")
-                                    response.raise_for_status()
-                                    
-                                    with open(block_path, 'wb') as f:
-                                        for chunk in response.iter_bytes(chunk_size=8192):
-                                            f.write(chunk)
-                                            if download_callback:
-                                                download_callback(f.tell())
+                                # 回滚为 download_file 以确保最佳兼容性和性能
+                                self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path, callback=download_callback)
                             else:
                                 # 对于压缩模式，暂时保留原逻辑，或者也改成流式处理（稍微复杂点）
                                 # 为了保持一致性，也改成流式

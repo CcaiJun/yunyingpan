@@ -150,47 +150,76 @@ class NBDServer:
                         conn.sendall(b'\x00' * 124)
                     break
                 elif opt == NBD_OPT_GO or opt == NBD_OPT_INFO:
-                    # nbd-client tries GO/INFO. We return ERR_UNSUP to force it fallback to EXPORT_NAME
-                    # or implement GO properly. For now, let's try to just return UNSUP.
                     conn.sendall(struct.pack(">QIII", NBD_REP_MAGIC, opt, NBD_REP_ERR_UNSUP, 0))
                 elif opt == NBD_OPT_ABORT:
                     conn.close()
                     return
                 elif opt == NBD_OPT_LIST:
-                    # Return a list of exports
                     export_name = b"default"
                     reply_len = 4 + len(export_name)
                     conn.sendall(struct.pack(">QIII", NBD_REP_MAGIC, opt, NBD_REP_SERVER, reply_len))
                     conn.sendall(struct.pack(">I", len(export_name)) + export_name)
-                    # End list
                     conn.sendall(struct.pack(">QIII", NBD_REP_MAGIC, opt, NBD_REP_ACK, 0))
                 else:
-                    # Unsupported option
                     conn.sendall(struct.pack(">QIII", NBD_REP_MAGIC, opt, NBD_REP_ERR_UNSUP, 0))
             
             # 2. Transmission Phase
-            while True:
-                req_header = self._recv_all(conn, 28)
-                if req_header is None: break
-                magic, flags, type, handle, offset, length = struct.unpack(">IHHQQI", req_header)
-                if magic != 0x25609513: break # NBD_REQUEST_MAGIC
-                
-                if type == NBD_CMD_READ:
+            # 使用线程池并发处理请求，避免单次慢 IO 阻塞整个连接
+            import concurrent.futures
+            send_lock = threading.Lock()
+            
+            def send_reply(data):
+                try:
+                    with send_lock:
+                        conn.sendall(data)
+                except: pass
+
+            def handle_read(handle, offset, length):
+                try:
                     data = self.bm.read(length, offset)
-                    conn.sendall(struct.pack(">IIQ", 0x67446698, 0, handle) + data)
-                elif type == NBD_CMD_WRITE:
-                    data = self._recv_all(conn, length)
-                    if data is None: break
+                    send_reply(struct.pack(">IIQ", 0x67446698, 0, handle) + data)
+                except Exception as e:
+                    logger.error(f"Read error: {e}")
+                    send_reply(struct.pack(">IIQ", 0x67446698, 1, handle)) # EPERM
+
+            def handle_write(handle, offset, data):
+                try:
                     self.bm.write(data, offset)
-                    conn.sendall(struct.pack(">IIQ", 0x67446698, 0, handle))
-                elif type == NBD_CMD_DISC:
-                    break
-                elif type == NBD_CMD_FLUSH:
+                    send_reply(struct.pack(">IIQ", 0x67446698, 0, handle))
+                except Exception as e:
+                    logger.error(f"Write error: {e}")
+                    send_reply(struct.pack(">IIQ", 0x67446698, 1, handle)) # EPERM
+            
+            def handle_flush(handle):
+                try:
                     self.bm.sync()
-                    conn.sendall(struct.pack(">IIQ", 0x67446698, 0, handle))
-                else:
-                    # Unsupported command, send error
-                    conn.sendall(struct.pack(">IIQ", 0x67446698, 1, handle)) # 1 is EPERM
+                    send_reply(struct.pack(">IIQ", 0x67446698, 0, handle))
+                except Exception as e:
+                    logger.error(f"Flush error: {e}")
+                    send_reply(struct.pack(">IIQ", 0x67446698, 1, handle))
+
+            # 限制并发数为 32，避免过多线程竞争
+            with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+                while True:
+                    req_header = self._recv_all(conn, 28)
+                    if req_header is None: break
+                    magic, flags, type, handle, offset, length = struct.unpack(">IHHQQI", req_header)
+                    if magic != 0x25609513: break # NBD_REQUEST_MAGIC
+                    
+                    if type == NBD_CMD_READ:
+                        executor.submit(handle_read, handle, offset, length)
+                    elif type == NBD_CMD_WRITE:
+                        # WRITE 数据必须在此处串行读取，否则会污染下一个 header
+                        data = self._recv_all(conn, length)
+                        if data is None: break
+                        executor.submit(handle_write, handle, offset, data)
+                    elif type == NBD_CMD_DISC:
+                        break
+                    elif type == NBD_CMD_FLUSH:
+                        executor.submit(handle_flush, handle)
+                    else:
+                        # Unsupported command
+                        send_reply(struct.pack(">IIQ", 0x67446698, 1, handle))
 
         except Exception as e:
             logger.error(f"NBD client error: {e}")
