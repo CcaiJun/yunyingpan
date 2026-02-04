@@ -134,6 +134,11 @@ class MetadataDB:
             cursor = conn.execute('SELECT COUNT(*) FROM blocks WHERE remote_exists = 1')
             return cursor.fetchone()[0]
 
+    def touch_block(self, block_id):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('UPDATE blocks SET last_access = ? WHERE block_id = ?', (time.time(), block_id))
+            conn.commit()
+
 class BlockManager:
     def __init__(self, dav_url, dav_user, dav_password, cache_dir, disk_size_gb, max_cache_size_gb, 
                  block_size_mb=4, img_name="virtual_disk.img", remote_path="blocks", concurrency=4,
@@ -423,15 +428,30 @@ class BlockManager:
                         current_real_size += f_real_size
                     except: pass
                 if current_real_size > self.max_cache_size:
-                    lru_blocks = self.db.get_lru_blocks(20)
+                    over_size = current_real_size - self.max_cache_size
+                    # 估算需要删除的块数 (每块 block_size)
+                    blocks_to_delete = (over_size // self.block_size) + 5 
+                    # 每次清理至少 20 块，最多 500 块，防止单次清理时间过长
+                    blocks_to_delete = max(20, min(blocks_to_delete, 500))
+                    
+                    logger.info(f"Cache over limit ({current_real_size/1024/1024:.1f}MB > {self.max_cache_size/1024/1024:.1f}MB), deleting {blocks_to_delete} blocks")
+                    
+                    lru_blocks = self.db.get_lru_blocks(blocks_to_delete)
                     for bid in lru_blocks:
                         path = self._get_block_path(bid)
                         if os.path.exists(path):
-                            os.remove(path)
-                            self.db.set_block_status(bid, 'empty')
+                            try:
+                                os.remove(path)
+                                self.db.set_block_status(bid, 'empty')
+                            except Exception as e:
+                                logger.error(f"Failed to remove cache block {bid}: {e}")
+                
+                # 即使没有超过限制，也要休息一下，避免 100% CPU 占用
+                time.sleep(10)
             except Exception as e:
                 logger.error(f"Cache worker error: {e}")
-            time.sleep(60)
+                time.sleep(10)
+            # 删掉多余的 time.sleep(60)，统一使用上面的 sleep
 
     def read(self, length, offset):
         result = bytearray(length)
@@ -510,7 +530,9 @@ class BlockManager:
                 logger.error(f"Read block {block_id} file failed: {e}")
                 result[bytes_read:bytes_read+chunk_len] = b'\x00' * chunk_len
                 bytes_read += chunk_len
-            self.db.set_block_status(block_id, status)
+            
+            # 更新访问时间
+            self.db.touch_block(block_id)
         return bytes(result)
 
     def write(self, buf, offset):
