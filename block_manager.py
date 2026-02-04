@@ -150,7 +150,8 @@ class BlockManager:
                 dav_url, 
                 auth=(dav_user, dav_password), 
                 timeout=Timeout(60.0, connect=20.0),
-                limits=limits
+                limits=limits,
+                follow_redirects=True
             )
         else:
             self.client = None
@@ -227,15 +228,21 @@ class BlockManager:
         try:
             logger.info(f"Scanning remote blocks for {self.img_name} in {self.remote_path}...")
             # 1. 一次性获取远程文件列表 (WebDAV ls 通常是一个 PROPFIND 请求)
-            try:
-                files = self.client.ls(self.remote_path, detail=False)
-            except Exception as ls_err:
-                logger.error(f"Failed to list remote directory {self.remote_path}: {ls_err}")
-                # 尝试创建目录，可能是不存在
+            max_retries = 3
+            files = []
+            for attempt in range(1, max_retries + 1):
                 try:
-                    self.client.mkdir(self.remote_path)
-                except: pass
-                files = []
+                    files = self.client.ls(self.remote_path, detail=False)
+                    break
+                except Exception as ls_err:
+                    logger.error(f"Failed to list remote directory {self.remote_path} (attempt {attempt}/{max_retries}): {ls_err}")
+                    if attempt == max_retries:
+                        # 只有最后一次尝试失败才尝试 mkdir
+                        try:
+                            self.client.mkdir(self.remote_path)
+                        except: pass
+                    else:
+                        time.sleep(2) # 重试前稍等
             
             remote_block_ids = []
             for f in files:
@@ -464,56 +471,86 @@ class BlockManager:
             block_path = self._get_block_path(block_id)
             status, remote_exists = self.db.get_block_info(block_id)
             if not os.path.exists(block_path):
-                # 只有在初次启动且没有进行过远程扫描时才调用 exists 检查
-                remote_exists_check = remote_exists
-                if not remote_exists and self.use_remote and not self._remote_dirs_checked:
-                    try:
-                        remote_exists_check = self.client.exists(f"{self.remote_path}/blk_{block_id:08d}.dat")
-                    except:
-                        remote_exists_check = False
-                
-                if self.use_remote and remote_exists_check:
-                    try:
-                        with self.downloading_lock: self.downloading_count += 1
-                        
-                        # 使用回调函数实时更新下载流量
-                        last_transferred = 0
-                        def download_callback(transferred):
-                            nonlocal last_transferred
-                            diff = transferred - last_transferred
-                            if diff > 0:
-                                self.download_limiter.request(diff)
-                                with self.stats_lock:
-                                    self.total_downloaded_bytes += diff
-                            last_transferred = transferred
-                        
-                        if self.compression == "none":
-                            self.client.download_file(f"{self.remote_path}/blk_{block_id:08d}.dat", block_path, callback=download_callback)
-                        else:
-                            import io
-                            data_stream = io.BytesIO()
-                            self.client.download_fileobj(f"{self.remote_path}/blk_{block_id:08d}.dat", data_stream, callback=download_callback)
-                            compressed_data = data_stream.getvalue()
+                # 优化策略：不进行预先检查，直接尝试下载
+                # 这样可以减少一次 PROPFIND 请求 (RTT)，如果文件不存在，下载会返回 404
+                if self.use_remote:
+                    max_retries = 3
+                    download_success = False
+                    for attempt in range(1, max_retries + 1):
+                        try:
+                            with self.downloading_lock: self.downloading_count += 1
                             
-                            if self.compression == "zstd":
-                                with self.dctx_lock:
-                                    raw_data = self.dctx.decompress(compressed_data)
-                            elif self.compression == "lz4":
-                                raw_data = lz4.frame.decompress(compressed_data)
+                            # 使用回调函数实时更新下载流量
+                            last_transferred = 0
+                            def download_callback(transferred):
+                                nonlocal last_transferred
+                                diff = transferred - last_transferred
+                                if diff > 0:
+                                    self.download_limiter.request(diff)
+                                    with self.stats_lock:
+                                        self.total_downloaded_bytes += diff
+                                last_transferred = transferred
+                            
+                            if self.compression == "none":
+                                # 直接使用底层的 httpx client 发起 GET 请求，避免 webdav4 的 download_file 触发额外的 PROPFIND
+                                with self.client.http.stream("GET", f"{self.remote_path}/blk_{block_id:08d}.dat", follow_redirects=True) as response:
+                                    if response.status_code == 404:
+                                        raise Exception("404 Not Found")
+                                    response.raise_for_status()
+                                    
+                                    with open(block_path, 'wb') as f:
+                                        for chunk in response.iter_bytes(chunk_size=8192):
+                                            f.write(chunk)
+                                            if download_callback:
+                                                download_callback(f.tell())
                             else:
-                                raw_data = compressed_data
-                            
-                            with open(block_path, 'wb') as f:
-                                f.write(raw_data)
+                                # 对于压缩模式，暂时保留原逻辑，或者也改成流式处理（稍微复杂点）
+                                # 为了保持一致性，也改成流式
+                                with self.client.http.stream("GET", f"{self.remote_path}/blk_{block_id:08d}.dat", follow_redirects=True) as response:
+                                    if response.status_code == 404:
+                                        raise Exception("404 Not Found")
+                                    response.raise_for_status()
+                                    
+                                    compressed_data = b""
+                                    for chunk in response.iter_bytes():
+                                        compressed_data += chunk
+                                        if download_callback:
+                                            download_callback(len(compressed_data))
+                                    
+                                    if self.compression == "zstd":
+                                        with self.dctx_lock:
+                                            raw_data = self.dctx.decompress(compressed_data)
+                                    elif self.compression == "lz4":
+                                        raw_data = lz4.frame.decompress(compressed_data)
+                                    else:
+                                        raw_data = compressed_data
+                                    
+                                    with open(block_path, 'wb') as f:
+                                        f.write(raw_data)
 
-                        self.db.set_block_status(block_id, 'cached', remote_exists=1)
-                    except Exception as e:
-                        logger.error(f"Download block {block_id} failed: {e}")
+                            self.db.set_block_status(block_id, 'cached', remote_exists=1)
+                            download_success = True
+                            break
+                        except Exception as e:
+                            # 检查是否是 404 错误
+                            error_str = str(e)
+                            if "404" in error_str or "Not Found" in error_str:
+                                # 文件不存在，不需要重试
+                                break
+                            
+                            logger.error(f"Download block {block_id} failed (attempt {attempt}/{max_retries}): {e}")
+                            if attempt < max_retries:
+                                time.sleep(1)
+                        finally:
+                            with self.downloading_lock: self.downloading_count -= 1
+                    
+                    if not download_success:
                         result[bytes_read:bytes_read+chunk_len] = b'\x00' * chunk_len
                         bytes_read += chunk_len
+                        # 标记为 empty，但不一定更新 remote_exists=0，因为可能是网络错误
+                        # 只有确认是 404 才更新 remote_exists=0，这里简化处理，暂不更新数据库的 remote_exists，以免误判
+                        # 或者如果明确是 404，可以更新。
                         continue
-                    finally:
-                        with self.downloading_lock: self.downloading_count -= 1
                 else:
                     result[bytes_read:bytes_read+chunk_len] = b'\x00' * chunk_len
                     bytes_read += chunk_len

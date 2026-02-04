@@ -470,10 +470,20 @@ def do_mount(inst: DiskInstance):
             if inst.final_mountpoint in check_mount.stdout:
                 logger.info(f"Path {inst.final_mountpoint} already mounted, skipping mount command.")
             else:
-                subprocess.run(mount_cmd, check=True, timeout=30)
+                try:
+                    subprocess.run(mount_cmd, check=True, timeout=120)
+                except subprocess.CalledProcessError as e:
+                    if e.returncode == 32:
+                        logger.warning("Mount failed with structure error, attempting fsck repair...")
+                        # 尝试自动修复
+                        subprocess.run(['fsck.ext4', '-y', nbd_dev], check=False)
+                        # 修复后重试挂载
+                        subprocess.run(mount_cmd, check=True, timeout=120)
+                    else:
+                        raise e
         except subprocess.TimeoutExpired:
             logger.error(f"Mount command timed out (Version {current_version}): {' '.join(mount_cmd)}")
-            raise Exception("挂载磁盘超时，系统响应缓慢")
+            raise Exception("挂载磁盘超时，可能是因为正在从云端下载大量元数据，请耐心等待或重试")
         except subprocess.CalledProcessError as e:
             # 如果报错信息包含 "already mounted"，视为成功
             if "already mounted" in str(e.stderr or "") or "already mounted" in str(e.output or ""):
@@ -864,7 +874,7 @@ async def list_webdav_computers(req: Request):
     
     from webdav4.client import Client as WebDAVClient
     try:
-        client = WebDAVClient(dav_url, auth=(dav_user, dav_password))
+        client = WebDAVClient(dav_url, auth=(dav_user, dav_password), timeout=60.0, follow_redirects=True)
         
         # 确保 v_disks 目录存在
         if not client.exists("v_disks"):
@@ -904,7 +914,7 @@ async def list_webdav_disks(req: Request):
     
     from webdav4.client import Client as WebDAVClient
     try:
-        client = WebDAVClient(dav_url, auth=(dav_user, dav_password))
+        client = WebDAVClient(dav_url, auth=(dav_user, dav_password), timeout=60.0, follow_redirects=True)
         path = f"v_disks/{computer_name}"
         
         if not client.exists(path):
@@ -941,7 +951,7 @@ async def get_webdav_disk_config(req: Request):
     from webdav4.client import Client as WebDAVClient
     import io
     try:
-        client = WebDAVClient(dav_url, auth=(dav_user, dav_password))
+        client = WebDAVClient(dav_url, auth=(dav_user, dav_password), timeout=60.0, follow_redirects=True)
         # 尝试获取 config.json
         # 路径规则：v_disks/计算机名/虚拟硬盘名/config.json
         config_path = f"v_disks/{computer_name}/{disk_name}/config.json"
@@ -965,7 +975,7 @@ def sync_config_to_webdav_task(config: MountConfig):
         from webdav4.client import Client as WebDAVClient
         import io
         logger.info(f"Background: Starting cloud config sync for disk: {config.disk_name}")
-        client = WebDAVClient(config.dav_url, auth=(config.dav_user, config.dav_password))
+        client = WebDAVClient(config.dav_url, auth=(config.dav_user, config.dav_password), timeout=60.0, follow_redirects=True)
         
         remote_path_clean = config.remote_path.strip('/')
         remote_config_path = f"{remote_path_clean}/config.json"
@@ -1105,7 +1115,7 @@ def delete_disk(disk_name: str, delete_remote: bool = False):
     if delete_remote and target_config:
         try:
             from webdav4.client import Client as WebDAVClient
-            client = WebDAVClient(target_config['dav_url'], auth=(target_config['dav_user'], target_config['dav_password']))
+            client = WebDAVClient(target_config['dav_url'], auth=(target_config['dav_user'], target_config['dav_password']), timeout=60.0, follow_redirects=True)
             remote_path = target_config['remote_path'].strip('/')
             if client.exists(remote_path):
                 logger.info(f"Deleting remote directory: {remote_path}")
