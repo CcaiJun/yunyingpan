@@ -470,7 +470,19 @@ def do_mount(inst: DiskInstance):
             if not bm._remote_dirs_checked:
                  raise Exception("云端扫描超时未完成，无法确认磁盘状态。为防止数据丢失，已终止操作。")
                  
-            logger.info(f"Disk {cfg.disk_name} confirmed empty (Remote scan OK, DB empty, LS empty), proceeding with format.")
+            # 4. 终极防线：如果扫描结果为空，但云端存在 config.json，说明这可能是一个旧磁盘，严禁格式化
+            try:
+                # 注意：这里需要确保路径正确，bm.remote_path 通常是 v_disks/computer/disk
+                config_check_path = f"{bm.remote_path}/config.json"
+                if bm.client.exists(config_check_path):
+                     raise Exception("严重警告：检测到云端存在配置文件(config.json)，但未扫描到任何数据块。这极可能是网络导致的扫描不完整。为防止数据被清空，系统已自动拦截格式化操作。请尝试重启应用或联系开发者。")
+            except Exception as e:
+                # 如果是上面抛出的异常，直接向上抛
+                if "严重警告" in str(e): raise e
+                # 其他网络错误（如检查 config.json 失败），暂不阻拦，因为可能是新盘
+                pass
+
+            logger.info(f"Disk {cfg.disk_name} confirmed empty (Remote scan OK, DB empty, LS empty, No config.json), proceeding with format.")
 
         inst.startup_progress = 75
         try:
@@ -615,6 +627,22 @@ def do_mount(inst: DiskInstance):
 def unmount_disk(inst: DiskInstance):
     inst.status = "stopped"
     import subprocess
+    
+    # 尝试保存索引
+    try:
+        bm = None
+        if inst.config.driver_mode == "fuse":
+            if inst.vdrive:
+                bm = inst.vdrive.bm
+        else:
+            bm = inst.vdrive
+        
+        if bm and bm.use_remote:
+            logger.info(f"Saving remote index for {inst.config.disk_name} before unmount...")
+            bm._save_remote_index()
+    except Exception as e:
+        logger.warning(f"Failed to save index during unmount: {e}")
+
     try:
         # 1. 卸载最终挂载点
         subprocess.run(['umount', '-l', inst.final_mountpoint], check=False)

@@ -5,6 +5,7 @@ import time
 import logging
 import threading
 import collections
+import json
 import zstandard as zstd
 import lz4.frame
 from webdav4.client import Client as WebDAVClient
@@ -207,6 +208,8 @@ class BlockManager:
         self.stats_lock = threading.Lock()
         self._remote_dirs_checked = False
         self.scan_error = None # 记录扫描过程中的错误，用于上层判断安全性
+        self.index_dirty = False # 标记索引是否需要更新
+        self.last_index_save = time.time()
         
         # 速度追踪
         self.total_downloaded_bytes = 0
@@ -242,9 +245,72 @@ class BlockManager:
             else:
                 threading.Thread(target=self._scan_remote_blocks, daemon=True).start()
 
+    def _load_remote_index(self):
+        """尝试从云端加载块索引文件 block_index.json"""
+        if not self.use_remote: return False
+        
+        index_path = f"{self.remote_path}/block_index.json"
+        try:
+            import io
+            bio = io.BytesIO()
+            # 尝试下载索引文件
+            self.client.download_fileobj(index_path, bio)
+            bio.seek(0)
+            data = json.load(bio)
+            
+            if isinstance(data, list):
+                # 校验数据格式
+                block_ids = [int(x) for x in data if isinstance(x, (int, str)) and str(x).isdigit()]
+                if block_ids:
+                    logger.info(f"Loaded remote index with {len(block_ids)} blocks for {self.img_name}")
+                    self.db.batch_set_remote_exists(block_ids)
+                    return True
+            return False
+        except Exception as e:
+            # 404 是正常情况（新盘或旧盘未生成索引）
+            if "404" not in str(e) and "Not Found" not in str(e):
+                logger.warning(f"Failed to load remote index: {e}")
+            return False
+
+    def _save_remote_index(self):
+        """将当前已知的远程块列表保存到 block_index.json"""
+        if not self.use_remote: return
+        
+        try:
+            # 获取所有 remote_exists=1 的块ID
+            with sqlite3.connect(self.db.db_path) as conn:
+                cursor = conn.execute('SELECT block_id FROM blocks WHERE remote_exists = 1')
+                block_ids = [row[0] for row in cursor.fetchall()]
+            
+            if not block_ids:
+                return
+
+            import io
+            data = json.dumps(block_ids)
+            bio = io.BytesIO(data.encode('utf-8'))
+            
+            index_path = f"{self.remote_path}/block_index.json"
+            self.client.upload_fileobj(bio, index_path, overwrite=True)
+            logger.info(f"Saved remote index with {len(block_ids)} blocks for {self.img_name}")
+            self.last_index_save = time.time()
+            self.index_dirty = False
+        except Exception as e:
+            logger.error(f"Failed to save remote index: {e}")
+
     def _scan_remote_blocks(self):
         try:
             logger.info(f"Scanning remote blocks for {self.img_name} in {self.remote_path}...")
+            
+            # 0. 优先尝试加载索引文件 (Fast Path)
+            if self._load_remote_index():
+                logger.info(f"Index loaded successfully, skipping full scan for {self.img_name}")
+                self._remote_dirs_checked = True
+                
+                # 预热逻辑：主动触发前 2 个块的下载
+                # 即使是索引加载的，也预热一下
+                threading.Thread(target=self.read, args=(self.block_size, 0), daemon=True).start()
+                return
+
             # 1. 一次性获取远程文件列表 (WebDAV ls 通常是一个 PROPFIND 请求)
             max_retries = 3
             files = []
@@ -275,6 +341,9 @@ class BlockManager:
                 # 2. 批量更新数据库 (单个事务)
                 self.db.batch_set_remote_exists(remote_block_ids)
                 logger.info(f"Scan complete: found and indexed {len(remote_block_ids)} existing remote blocks for {self.img_name}")
+                
+                # 扫描完成后，立即生成并上传索引文件，以便下次快速启动
+                threading.Thread(target=self._save_remote_index, daemon=True).start()
                 
                 # 预热逻辑：主动触发前 2 个块的下载（通常包含文件系统超级块和根 Inode）
                 # 这会让挂载后的第一次 ls 变得飞快
@@ -433,6 +502,7 @@ class BlockManager:
                                             self.client.upload_fileobj(data_stream, remote_file_path, overwrite=True, callback=upload_callback)
                                         
                                         self.db.set_block_status(block_id, 'cached', remote_exists=1)
+                                        self.index_dirty = True
                                         # logger.info(f"Successfully uploaded block {block_id}")
                                         break
                                     except Exception as e:
