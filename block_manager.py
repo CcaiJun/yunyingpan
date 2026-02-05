@@ -206,6 +206,7 @@ class BlockManager:
         self.upload_lock = threading.Lock()
         self.stats_lock = threading.Lock()
         self._remote_dirs_checked = False
+        self.scan_error = None # 记录扫描过程中的错误，用于上层判断安全性
         
         # 速度追踪
         self.total_downloaded_bytes = 0
@@ -286,6 +287,7 @@ class BlockManager:
             
         except Exception as e:
             logger.error(f"Failed to scan remote blocks: {e}")
+            self.scan_error = str(e)
         finally:
             # 标记扫描完成，无论是否发现文件，或者是否出错
             # 这样可以防止 server.py 启动时卡死在等待扫描上
@@ -338,15 +340,13 @@ class BlockManager:
     def has_remote_data(self):
         if not self.use_remote:
             return False
-        try:
-            # 检查远程目录下是否存在任何 block 文件
-            files = self.client.ls(self.remote_path, detail=False)
-            for f in files:
-                if "blk_" in f:
-                    return True
-            return False
-        except:
-            return False
+        # 移除 try-except，让异常抛出以便上层感知网络错误
+        # 检查远程目录下是否存在任何 block 文件
+        files = self.client.ls(self.remote_path, detail=False)
+        for f in files:
+            if "blk_" in f:
+                return True
+        return False
 
     def _upload_worker(self):
         while True:

@@ -395,18 +395,19 @@ def do_mount(inst: DiskInstance):
                     logger.info(f"Disk {cfg.disk_name} already has indexed blocks, skipping wait for remote scan.")
                 else:
                     logger.info(f"Waiting for remote scan to complete for {cfg.disk_name}...")
-                    max_scan_wait = 30
+                    max_scan_wait = 60 # 延长等待时间以应对大量文件的还原
                     while max_scan_wait > 0 and not bm._remote_dirs_checked:
                         time.sleep(1)
                         max_scan_wait -= 1
                     if not bm._remote_dirs_checked:
-                        logger.warning(f"Remote scan for {cfg.disk_name} is taking too long, proceeding anyway...")
+                        logger.warning(f"Remote scan for {cfg.disk_name} is taking too long (60s+)...")
         except: pass
 
         needs_format = True
         
         # 增加逻辑：如果远程已经有数据块，绝对不要格式化，否则会破坏原有数据
         has_remote = False
+        remote_check_error = None
         try:
             bm = None
             if inst.config.driver_mode == "fuse":
@@ -425,6 +426,23 @@ def do_mount(inst: DiskInstance):
                     logger.info(f"Disk {cfg.disk_name} has remote data (via ls), skipping auto-format.")
         except Exception as e:
             logger.warning(f"Failed to check remote data: {e}")
+            remote_check_error = str(e)
+            
+        # 安全守门员：在决定格式化之前，必须确认这不是误判
+        if needs_format and not has_remote and bm and bm.use_remote:
+            # 1. 如果扫描曾经出错
+            if bm.scan_error:
+                raise Exception(f"云端扫描曾发生错误 ({bm.scan_error})，无法确认磁盘是否为空。为防止数据丢失，已终止格式化。请检查网络。")
+            
+            # 2. 如果刚才的主动检查出错
+            if remote_check_error:
+                raise Exception(f"连接云端确认状态失败 ({remote_check_error})，为防止数据丢失，已终止格式化。请检查网络。")
+                
+            # 3. 如果扫描根本没完成（超时）
+            if not bm._remote_dirs_checked:
+                 raise Exception("云端扫描超时未完成，无法确认磁盘状态。为防止数据丢失，已终止操作。")
+                 
+            logger.info(f"Disk {cfg.disk_name} confirmed empty (Remote scan OK, DB empty, LS empty), proceeding with format.")
 
         inst.startup_progress = 75
         try:
