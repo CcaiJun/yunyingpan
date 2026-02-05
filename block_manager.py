@@ -453,9 +453,11 @@ class BlockManager:
                                 current_real_size += f_real_size
                             except: pass
                 
-                if current_real_size > self.max_cache_size:
-                    over_size = current_real_size - self.max_cache_size
-                    logger.info(f"Cache over limit ({current_real_size/1024/1024:.1f}MB > {self.max_cache_size/1024/1024:.1f}MB), need to free {over_size/1024/1024:.1f}MB")
+                # 提前清理：当达到 90% 容量时就开始触发清理，从最久未访问的文件开始清理
+                cleanup_threshold = self.max_cache_size * 0.9
+                if current_real_size > cleanup_threshold:
+                    over_size = current_real_size - cleanup_threshold
+                    logger.info(f"Cache over 90% threshold ({current_real_size/1024/1024:.1f}MB > {cleanup_threshold/1024/1024:.1f}MB), need to free {over_size/1024/1024:.1f}MB")
                     
                     freed_size = 0
                     total_deleted_count = 0

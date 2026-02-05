@@ -590,33 +590,29 @@ def unmount_disk(inst: DiskInstance):
 # 全局管理
 disks: Dict[str, DiskInstance] = {}
 
-# 初始化加载
-for cfg_dict in load_configs():
-    try:
-        cfg = MountConfig(**cfg_dict)
-        instance = DiskInstance(cfg)
-        
-        # 自动检测是否已经在运行
-        # 注意：对于依赖本进程服务的挂载（FUSE/NBD），应用重启意味着服务已停止，
-        # 现有的挂载点即使存在也是失效的（Stale），因此不应标记为 running，
-        # 而应保持 stopped 状态，让 auto_mount_all 触发重新挂载（包含清理逻辑）。
-        if os.path.ismount(instance.final_mountpoint):
-            logger.warning(f"Detected stale mount for disk {cfg.disk_name} (Service restarted), will re-mount.")
-            # 尝试做一次简单的卸载，虽然 do_mount 也会做，但这里清理一下更干净
-            try:
-                import subprocess
-                subprocess.run(['umount', '-l', instance.final_mountpoint], check=False)
-            except: pass
-        
-        disks[cfg.disk_name] = instance
-    except:
-        pass
-
 @app.on_event("startup")
 async def startup_event():
     import time
     logger.info("FastAPI Backend Starting Up...")
     logger.info(f"Registered routes: {[route.path for route in app.routes]}")
+    
+    # 初始化加载
+    for cfg_dict in load_configs():
+        try:
+            cfg = MountConfig(**cfg_dict)
+            instance = DiskInstance(cfg)
+            
+            # 自动检测是否已经在运行
+            if os.path.ismount(instance.final_mountpoint):
+                logger.warning(f"Detected stale mount for disk {cfg.disk_name} (Service restarted), will re-mount.")
+                try:
+                    import subprocess
+                    subprocess.run(['umount', '-l', instance.final_mountpoint], check=False)
+                except: pass
+            
+            disks[cfg.disk_name] = instance
+        except:
+            pass
     
     # 后台状态更新逻辑
     def status_updater():
@@ -1038,6 +1034,12 @@ async def mount_drive(config: MountConfig):
             bm = existing_instance.vdrive if existing_instance.config.driver_mode == "nbd" else existing_instance.vdrive.bm
             bm.upload_limiter.set_limit(config.upload_limit_kb)
             bm.download_limiter.set_limit(config.download_limit_kb)
+            
+            # 动态更新缓存大小限制
+            if config.max_cache_gb != old.max_cache_gb:
+                new_size = config.max_cache_gb * 1024 * 1024 * 1024
+                bm.max_cache_size = new_size
+                logger.info(f"Dynamic update: Cache limit for {config.disk_name} changed to {config.max_cache_gb}GB")
 
         existing_instance.config = config
         instance = existing_instance

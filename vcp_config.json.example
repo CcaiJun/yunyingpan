@@ -1,0 +1,19 @@
+{
+  "dav_url": "https://webdav.your-provider.com/webdav",
+  "dav_user": "your_username",
+  "dav_password": "your_password_or_token",
+  "mount_path": "/mnt/v_disks/example_mount",
+  "cache_dir": "/var/cache/v_drive/example_cache",
+  "disk_size_gb": 100,
+  "max_cache_gb": 10,
+  "disk_name": "example_disk",
+  "block_size_mb": 4,
+  "remote_path": "v_disks/your_computer/example_disk",
+  "concurrency": 8,
+  "inode_ratio": 65536,
+  "compression": "zstd",
+  "compression_level": 3,
+  "driver_mode": "fuse",
+  "upload_limit_kb": 0,
+  "download_limit_kb": 0
+}
