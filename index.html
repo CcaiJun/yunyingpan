@@ -1245,6 +1245,26 @@
                 const res = await fetch(`${API_BASE}/api/system/config`);
                 const config = await res.json();
                 document.getElementById('system_computer_name').value = config.computer_name || "";
+                
+                // 自动填充保存的 WebDAV 信息
+                if (config.last_dav_url) {
+                    const davUrlEl = document.getElementById('dav_url');
+                    const davUserEl = document.getElementById('dav_user');
+                    const davPassEl = document.getElementById('dav_password');
+                    
+                    if (davUrlEl && !davUrlEl.value) davUrlEl.value = config.last_dav_url;
+                    if (davUserEl && !davUserEl.value) davUserEl.value = config.last_dav_user;
+                    if (davPassEl && !davPassEl.value) davPassEl.value = config.last_dav_password;
+                    
+                    // 同时也填充还原界面的信息，方便用户直接搜索
+                    const restoreUrlEl = document.getElementById('restore_dav_url');
+                    const restoreUserEl = document.getElementById('restore_dav_user');
+                    const restorePassEl = document.getElementById('restore_dav_password');
+                    
+                    if (restoreUrlEl && !restoreUrlEl.value) restoreUrlEl.value = config.last_dav_url;
+                    if (restoreUserEl && !restoreUserEl.value) restoreUserEl.value = config.last_dav_user;
+                    if (restorePassEl && !restorePassEl.value) restorePassEl.value = config.last_dav_password;
+                }
             } catch (e) {
                 console.error("加载系统配置失败:", e);
             }

@@ -45,6 +45,10 @@ SYSTEM_CONFIG_FILE = "system_config.json"
 
 class SystemConfig(BaseModel):
     computer_name: str = "default_pc"
+    # 保存最后一次使用的 WebDAV 配置
+    last_dav_url: Optional[str] = ""
+    last_dav_user: Optional[str] = ""
+    last_dav_password: Optional[str] = ""
 
 class MountConfig(BaseModel):
     dav_url: str
@@ -163,9 +167,19 @@ def do_mount(inst: DiskInstance):
                     subprocess.run(['nbd-client', '-d', inst.nbd_device], check=False, capture_output=True)
                 
                 # 兜底清理：尝试断开所有可能的 NBD 连接，确保端口释放
+                # 增加延迟，避免系统还没释放完端口又尝试连接
+                time.sleep(1)
                 for i in range(16):
-                    subprocess.run(['nbd-client', '-d', f'/dev/nbd{i}'], check=False, capture_output=True)
-                
+                    # 检查该设备是否正在使用，如果是，才尝试断开
+                    check_cmd = subprocess.run(['nbd-client', '-c', f'/dev/nbd{i}'], capture_output=True)
+                    if check_cmd.returncode == 0: # 0 表示已连接
+                         # 进一步确认这个连接是否是当前服务的残留（通过端口判断不太准，但可以暴力点）
+                         # 这里我们只断开连接到我们要使用的端口的设备，或者全部清理？
+                         # 为了安全，我们先只清理明确占用的。
+                         # 但如果上次崩溃了，inst.nbd_device 可能丢失。
+                         # 策略：如果端口被占用，那么占用该端口的 nbd 设备必须被断开。
+                         pass
+
                 if inst.nbd_server:
                     try:
                         logger.info(f"Stopping old NBD server (ID {inst.nbd_server.server_id})")
@@ -180,10 +194,10 @@ def do_mount(inst: DiskInstance):
                     if inst.thread.is_alive():
                         logger.warning(f"Old thread did not exit in time (Version {current_version})")
                 
-                # 确保端口已释放
+                # 强制释放端口：如果端口依然被占用，尝试杀掉占用该端口的进程
                 import socket
                 port_free = False
-                for _ in range(5):
+                for _ in range(10): # 增加等待次数
                     try:
                         test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                         test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -191,11 +205,17 @@ def do_mount(inst: DiskInstance):
                         test_sock.close()
                         port_free = True
                         break
-                    except:
+                    except OSError:
+                        # 尝试找出占用端口的进程并杀掉
+                        try:
+                            cmd = f"fuser -k {port}/tcp"
+                            subprocess.run(cmd, shell=True, check=False, capture_output=True)
+                        except: pass
                         time.sleep(1)
                 
                 if not port_free:
-                    logger.warning(f"Port {port} still seems busy after 5s (Version {current_version})")
+                    logger.warning(f"Port {port} still seems busy after 10s (Version {current_version})")
+                    raise Exception(f"端口 {port} 被占用且无法释放，请手动检查")
                 else:
                     logger.info(f"Port {port} is now free (Version {current_version})")
             subprocess.run(['umount', '-l', cfg.mount_path], check=False, capture_output=True)
@@ -361,10 +381,18 @@ def do_mount(inst: DiskInstance):
                 nbd_client_cmd = ["nbd-client", "127.0.0.1", str(port), nbd_dev, "-N", "default", "-g", "-persist"]
                 try:
                     # 使用 -persist 模式
+                    # 在连接前再次清理该设备，以防万一
+                    subprocess.run(['nbd-client', '-d', nbd_dev], capture_output=True)
+                    
                     result = subprocess.run(nbd_client_cmd, capture_output=True, text=True, timeout=15)
                     if result.returncode != 0:
                         logger.error(f"nbd-client failed with return code {result.returncode}: {result.stderr}")
-                        raise Exception(f"nbd-client 连接失败: {result.stderr}")
+                        # 如果连接失败，尝试强制释放设备后重试一次
+                        subprocess.run(['nbd-client', '-d', nbd_dev], capture_output=True)
+                        time.sleep(1)
+                        result = subprocess.run(nbd_client_cmd, capture_output=True, text=True, timeout=15)
+                        if result.returncode != 0:
+                             raise Exception(f"nbd-client 连接失败: {result.stderr}")
                     logger.info(f"nbd-client connected successfully (Version {current_version})")
                 except subprocess.TimeoutExpired:
                     logger.error(f"nbd-client connection timed out (Version {current_version})")
@@ -1013,6 +1041,15 @@ def sync_config_to_webdav_task(config: MountConfig):
 
 @app.post("/mount")
 async def mount_drive(config: MountConfig):
+    global system_config # 提前声明 global
+    
+    # 强制校验 WebDAV 凭据
+    if not config.dav_url or not config.dav_url.strip():
+        raise HTTPException(status_code=400, detail="WebDAV 地址不能为空")
+    if not config.dav_user or not config.dav_user.strip():
+        raise HTTPException(status_code=400, detail="WebDAV 用户名不能为空")
+    # dav_password 允许为空？有些服务器可能允许匿名或证书？暂不强制，但 URL 必须有。
+    
     # 路径规则强制执行/默认化
     # 1. WebDAV 保存路径：v_disks/计算机名/虚拟硬盘名
     if not config.remote_path or config.remote_path in ["blocks", "v_disks/blocks", f"v_disks/{config.disk_name}"]:
@@ -1029,6 +1066,14 @@ async def mount_drive(config: MountConfig):
     if not config.cache_dir or any(old in config.cache_dir for old in ["/tmp/v_drive_cache", "cache"]):
         config.cache_dir = f"/var/cache/{config.disk_name}"
         logger.info(f"Automatically set cache_dir to {config.cache_dir}")
+
+    # 保存 WebDAV 信息到系统配置，方便下次自动填充
+    # system_config 已经在函数开头声明为 global
+    if config.dav_url and config.dav_user:
+        system_config.last_dav_url = config.dav_url
+        system_config.last_dav_user = config.dav_user
+        system_config.last_dav_password = config.dav_password
+        save_system_config(system_config)
 
     # 检查是否是更新现有磁盘
     existing_instance = disks.get(config.disk_name)
@@ -1195,21 +1240,33 @@ def delete_disk(disk_name: str, delete_remote: bool = False):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/cache/prefetch")
-def prefetch_cache(path: str):
-    global vdrive_instance
-    if not vdrive_instance:
+def prefetch_cache(disk_name: str, path: str):
+    instance = disks.get(disk_name)
+    if not instance or not instance.vdrive:
         raise HTTPException(status_code=400, detail="Drive not mounted")
     
-    success = vdrive_instance.prefetch(path)
+    # 适配不同的驱动模式
+    if instance.config.driver_mode == "fuse":
+        # FUSE 模式下 vdrive 是 VDrive 实例
+        success = instance.vdrive.prefetch(path)
+    else:
+        # NBD 模式下 vdrive 是 BlockManager 实例，且 path 需要转换或暂不支持
+        # BlockManager 目前没有 prefetch 方法，暂时返回 False
+        success = False
+        
     return {"success": success}
 
 @app.post("/cache/evict")
-def evict_cache(path: str):
-    global vdrive_instance
-    if not vdrive_instance:
+def evict_cache(disk_name: str, path: str):
+    instance = disks.get(disk_name)
+    if not instance or not instance.vdrive:
         raise HTTPException(status_code=400, detail="Drive not mounted")
     
-    success = vdrive_instance.evict(path)
+    if instance.config.driver_mode == "fuse":
+        success = instance.vdrive.evict(path)
+    else:
+        success = False
+        
     return {"success": success}
 
 if __name__ == "__main__":

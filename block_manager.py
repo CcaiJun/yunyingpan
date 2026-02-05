@@ -349,19 +349,28 @@ class BlockManager:
         return False
 
     def _upload_worker(self):
+        logger.info(f"Upload worker started for {self.img_name}, use_remote={self.use_remote}")
         while True:
-            if not self.use_remote:
-                time.sleep(5)
-                continue
-            block_id = None
-            with self.upload_lock:
-                if self.upload_queue:
-                    block_id = self.upload_queue.pop()
-            if block_id is not None:
+            try:
+                if not self.use_remote:
+                    time.sleep(5)
+                    continue
+                block_id = None
+                with self.upload_lock:
+                    if self.upload_queue:
+                        # 使用 pop() 移除并返回一个元素
+                        block_id = self.upload_queue.pop()
+                        # logger.debug(f"Popped block {block_id} from queue, remaining: {len(self.upload_queue)}")
+                
+                if block_id is None:
+                    time.sleep(0.1)
+                    continue
+
                 self.db.set_block_status(block_id, 'uploading')
                 with self.uploading_lock: self.uploading_count += 1
                 try:
                     block_path = self._get_block_path(block_id)
+                    # logger.debug(f"Processing upload for block {block_id}")
                     status, remote_exists = self.db.get_block_info(block_id)
                     if os.path.exists(block_path):
                         remote_file_path = f"{self.remote_path}/blk_{block_id:08d}.dat"
@@ -373,9 +382,10 @@ class BlockManager:
                                 except: pass
                             else:
                                 self.db.set_block_status(block_id, 'cached', remote_exists=0)
-                            continue
-                        if not self._remote_dirs_checked:
-                            with self.upload_lock:
+                            # 处理完成，不需要放回队列
+                        else:
+                            if not self._remote_dirs_checked:
+                                # 这里不再加 upload_lock，避免死锁，改用专门的目录检查锁或简单的双重检查
                                 if not self._remote_dirs_checked:
                                     parts = self.remote_path.split('/')
                                     current = ""
@@ -385,56 +395,65 @@ class BlockManager:
                                             self.client.mkdir(current)
                                         except: pass
                                     self._remote_dirs_checked = True
-                        try:
-                            max_retries = 3
-                            for attempt in range(max_retries + 1):
-                                try:
-                                    if attempt > 0:
-                                        import random
-                                        time.sleep(random.uniform(0.5, 2.0))
-                                    
-                                    # 使用回调函数实时更新上传流量
-                                    last_transferred = 0
-                                    def upload_callback(transferred):
-                                        nonlocal last_transferred
-                                        diff = transferred - last_transferred
-                                        if diff > 0:
-                                            self.upload_limiter.request(diff)
-                                            with self.stats_lock:
-                                                self.total_uploaded_bytes += diff
-                                        last_transferred = transferred
-                                    
-                                    # 处理压缩逻辑
-                                    if self.compression == "none":
-                                        self.client.upload_file(block_path, remote_file_path, overwrite=True, callback=upload_callback)
-                                    else:
-                                        with open(block_path, 'rb') as f:
-                                            raw_data = f.read()
+                            try:
+                                max_retries = 3
+                                for attempt in range(max_retries + 1):
+                                    try:
+                                        if attempt > 0:
+                                            import random
+                                            time.sleep(random.uniform(0.5, 2.0))
                                         
-                                        if self.compression == "zstd":
-                                            with self.cctx_lock:
-                                                processed_data = self.cctx.compress(raw_data)
-                                        elif self.compression == "lz4":
-                                            processed_data = lz4.frame.compress(raw_data, compression_level=self.compression_level)
+                                        # 使用回调函数实时更新上传流量
+                                        last_transferred = 0
+                                        def upload_callback(transferred):
+                                            nonlocal last_transferred
+                                            diff = transferred - last_transferred
+                                            if diff > 0:
+                                                self.upload_limiter.request(diff)
+                                                with self.stats_lock:
+                                                    self.total_uploaded_bytes += diff
+                                            last_transferred = transferred
                                         
-                                        # 上传内存中的压缩数据
-                                        import io
-                                        data_stream = io.BytesIO(processed_data)
-                                        self.client.upload_fileobj(data_stream, remote_file_path, overwrite=True, callback=upload_callback)
-                                    
-                                    self.db.set_block_status(block_id, 'cached', remote_exists=1)
-                                    break
-                                except Exception as e:
-                                    if attempt == max_retries: raise e
-                        except Exception as upload_err:
-                            logger.error(f"Upload failed for block {block_id}: {upload_err}")
-                            raise upload_err
+                                        # 处理压缩逻辑
+                                        if self.compression == "none":
+                                            self.client.upload_file(block_path, remote_file_path, overwrite=True, callback=upload_callback)
+                                        else:
+                                            with open(block_path, 'rb') as f:
+                                                raw_data = f.read()
+                                            
+                                            if self.compression == "zstd":
+                                                with self.cctx_lock:
+                                                    processed_data = self.cctx.compress(raw_data)
+                                            elif self.compression == "lz4":
+                                                processed_data = lz4.frame.compress(raw_data, compression_level=self.compression_level)
+                                            
+                                            # 上传内存中的压缩数据
+                                            import io
+                                            data_stream = io.BytesIO(processed_data)
+                                            self.client.upload_fileobj(data_stream, remote_file_path, overwrite=True, callback=upload_callback)
+                                        
+                                        self.db.set_block_status(block_id, 'cached', remote_exists=1)
+                                        # logger.info(f"Successfully uploaded block {block_id}")
+                                        break
+                                    except Exception as e:
+                                        if attempt == max_retries: raise e
+                            except Exception as upload_err:
+                                logger.error(f"Upload failed for block {block_id}: {upload_err}")
+                                # 只有真正失败才放回队列
+                                with self.upload_lock: self.upload_queue.add(block_id)
+                                # 休息一下避免死循环重试
+                                time.sleep(2)
+                    else:
+                         # 如果文件不存在，可能是被删除了，记录个日志
+                         logger.warning(f"Block {block_id} file not found during upload, skipping.")
                 except Exception as e:
-                    logger.error(f"Block {block_id} upload failed: {e}")
+                    logger.error(f"Block {block_id} upload process failed: {e}")
                     with self.upload_lock: self.upload_queue.add(block_id)
                 finally:
                     with self.uploading_lock: self.uploading_count -= 1
-            time.sleep(0.1)
+            except Exception as outer_e:
+                logger.error(f"Upload worker crashed: {outer_e}")
+                time.sleep(1)
 
     def _cache_worker(self):
         logger.info(f"Cache worker started for {self.img_name}, limit={self.max_cache_size/1024/1024:.1f}MB")
