@@ -330,6 +330,8 @@ def do_mount(inst: DiskInstance):
                             logger.error(f"NBD server exited unexpectedly (Version {thread_version}, ID {s_id}, Status {inst.status})")
                             inst.status = "error"
                             inst.error_msg = "NBD 服务端异常退出"
+                        elif inst.status == "stopping":
+                            logger.info(f"NBD server stopped as requested (Version {thread_version}, ID {s_id})")
                         else:
                             logger.info(f"NBD server thread cleanup (Version {thread_version}, ID {s_id}, Status {inst.status})")
 
@@ -693,7 +695,7 @@ def do_mount(inst: DiskInstance):
         logger.error(f"Mount failed (Version {current_version}): {e}\n{traceback.format_exc()}")
 
 def unmount_disk(inst: DiskInstance):
-    inst.status = "stopped"
+    inst.status = "stopping"
     import subprocess
     
     # 尝试保存索引
@@ -728,6 +730,8 @@ def unmount_disk(inst: DiskInstance):
         subprocess.run(['umount', '-l', inst.config.mount_path], check=False)
     except Exception as e:
         logger.error(f"Unmount error: {e}")
+    finally:
+        inst.status = "stopped"
 
 # 全局管理
 disks: Dict[str, DiskInstance] = {}
@@ -879,32 +883,32 @@ async def startup_event():
                     if instance.config.driver_mode == "fuse":
                         if is_loop_mounted and is_fuse_connected:
                             instance.loop_status = "mounted"
-                            # 仅当不在启动中时才更新为 running
-                            if instance.status != "starting":
+                            # 仅当不在启动或停止中时才更新为 running
+                            if instance.status not in ["starting", "stopping"]:
                                 instance.status = "running"
                                 instance.error_msg = ""
                         elif is_loop_mounted:
                             instance.loop_status = "mounted"
-                            # 仅当不在启动中时才报连接断开错误
-                            if instance.status != "starting":
+                            # 仅当不在启动或停止中时才报连接断开错误
+                            if instance.status not in ["starting", "stopping"]:
                                 instance.status = "error"
                                 instance.error_msg = "FUSE 层连接断开 (Transport endpoint not connected)"
                         else:
                             instance.loop_status = "unmounted"
-                            # 仅当当前状态为 running 时才自动切换到 stopped，排除 starting 状态
+                            # 仅当当前状态为 running 时才自动切换到 stopped，排除 starting/stopping 状态
                             if instance.status == "running":
                                 instance.status = "stopped"
                     else:
                         # NBD 模式
                         if is_loop_mounted:
                             instance.loop_status = "mounted"
-                            # 仅当不在启动中时才更新为 running
-                            if instance.status != "starting":
+                            # 仅当不在启动或停止中时才更新为 running
+                            if instance.status not in ["starting", "stopping"]:
                                 instance.status = "running"
                                 instance.error_msg = ""
                         else:
                             instance.loop_status = "unmounted"
-                            # 仅当当前状态为 running 时才自动切换到 stopped，排除 starting 状态
+                            # 仅当当前状态为 running 时才自动切换到 stopped，排除 starting/stopping 状态
                             if instance.status == "running":
                                 instance.status = "stopped"
                 
