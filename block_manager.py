@@ -353,6 +353,11 @@ class BlockManager:
         """尝试从云端加载块索引文件 block_index.json (支持回滚机制)"""
         if not self.use_remote: return False
         
+        # 预先检查并尝试创建目录，避免 ls 本身报错
+        try:
+            self._ensure_remote_dirs()
+        except: pass
+        
         candidates = [f"{self.remote_path}/block_index.json"]
         
         # 尝试读取 pointer 文件获取最新版本作为备选
@@ -407,11 +412,39 @@ class BlockManager:
                 
         return False
 
+    def _ensure_remote_dirs(self):
+        """确保远程目录存在"""
+        if not self.use_remote or self._remote_dirs_checked:
+            return
+        
+        parts = self.remote_path.split('/')
+        current = ""
+        for part in parts:
+            if not part: continue
+            current = f"{current}/{part}".strip('/')
+            try:
+                # 尝试 ls 检查目录是否存在
+                self.client.ls(current, detail=False)
+            except Exception as e:
+                error_str = str(e).lower()
+                if "not found" in error_str or "404" in error_str or "could not be found" in error_str:
+                    try:
+                        logger.info(f"Creating remote directory: {current}")
+                        self.client.mkdir(current)
+                    except: pass
+                else:
+                    # 其他错误（如 401）抛出
+                    raise e
+        self._remote_dirs_checked = True
+
     def _save_remote_index(self):
         """将当前已知的远程块列表保存到 block_index.json (原子更新 + 多版本)"""
         if not self.use_remote: return
         
         try:
+            # 确保目录存在
+            self._ensure_remote_dirs()
+            
             # 获取所有 remote_exists=1 的块ID
             with sqlite3.connect(self.db.db_path) as conn:
                 cursor = conn.execute('SELECT block_id FROM blocks WHERE remote_exists = 1')
@@ -601,12 +634,20 @@ class BlockManager:
     def has_remote_data(self):
         if not self.use_remote:
             return False
-        # 移除 try-except，让异常抛出以便上层感知网络错误
         # 检查远程目录下是否存在任何 block 文件
-        files = self.client.ls(self.remote_path, detail=False)
-        for f in files:
-            if "blk_" in f:
-                return True
+        try:
+            files = self.client.ls(self.remote_path, detail=False)
+            for f in files:
+                if "blk_" in f:
+                    return True
+        except Exception as e:
+            # 如果是 404 (Not Found)，说明目录不存在，自然没有数据
+            error_str = str(e).lower()
+            if "not found" in error_str or "404" in error_str or "could not be found" in error_str:
+                logger.info(f"Remote path {self.remote_path} not found, assuming no remote data.")
+                return False
+            # 其他错误（如 401 Unauthorized, 500 Server Error, 网络连接失败等）依然抛出
+            raise e
         return False
 
     def _upload_worker(self):
@@ -645,17 +686,9 @@ class BlockManager:
                                 self.db.set_block_status(block_id, 'cached', remote_exists=0)
                             # 处理完成，不需要放回队列
                         else:
-                            if not self._remote_dirs_checked:
-                                # 这里不再加 upload_lock，避免死锁，改用专门的目录检查锁或简单的双重检查
-                                if not self._remote_dirs_checked:
-                                    parts = self.remote_path.split('/')
-                                    current = ""
-                                    for part in parts:
-                                        current = f"{current}/{part}".strip('/')
-                                        try:
-                                            self.client.mkdir(current)
-                                        except: pass
-                                    self._remote_dirs_checked = True
+                            # 确保目录存在
+                            self._ensure_remote_dirs()
+                            
                             try:
                                 max_retries = 3
                                 for attempt in range(max_retries + 1):
