@@ -359,19 +359,61 @@ def do_mount(inst: DiskInstance):
 
             with global_nbd_lock:
                 nbd_dev = None
-                for i in range(16):
+                # 尝试更多的 NBD 设备，并增强清理逻辑
+                for i in range(32):
                     dev = f"/dev/nbd{i}"
-                    # 检查是否已经挂载或正在被 nbd-client 使用
+                    if not os.path.exists(dev):
+                        continue
+                        
+                    # 检查是否正在被 mount
+                    mount_check = subprocess.run(['mount'], capture_output=True, text=True)
+                    is_mounted = (dev in mount_check.stdout)
+                    
+                    # 检查 nbd-client 状态
                     check_res = subprocess.run(['nbd-client', '-check', dev], capture_output=True)
-                    if check_res.returncode != 0:
-                        # 额外检查 mount 列表
-                        mount_check = subprocess.run(['mount'], capture_output=True, text=True)
-                        if dev not in mount_check.stdout:
+                    is_connected = (check_res.returncode == 0)
+                    
+                    if is_mounted:
+                        continue # 真正被占用的设备，跳过
+                        
+                    if is_connected:
+                        # 显示连接但未挂载，尝试强力断开
+                        logger.info(f"NBD device {dev} is connected but not mounted, forcing disconnect...")
+                        subprocess.run(['nbd-client', '-d', dev], capture_output=True)
+                        time.sleep(0.5)
+                        # 再次检查
+                        check_res = subprocess.run(['nbd-client', '-check', dev], capture_output=True)
+                        if check_res.returncode != 0:
                             nbd_dev = dev
                             break
+                    else:
+                        # 既没挂载也没连接，直接使用
+                        nbd_dev = dev
+                        break
+                    
                     inst.startup_progress = min(40, inst.startup_progress + 0.5)
                 
-                if not nbd_dev: raise Exception("没有可用的 NBD 设备")
+                if not nbd_dev:
+                    # 如果还是没找到，尝试最后的大招：断开所有未挂载的 nbd
+                    logger.warning("No free NBD device found, trying global cleanup...")
+                    for i in range(32):
+                        dev = f"/dev/nbd{i}"
+                        if os.path.exists(dev):
+                            mount_check = subprocess.run(['mount'], capture_output=True, text=True)
+                            if dev not in mount_check.stdout:
+                                subprocess.run(['nbd-client', '-d', dev], capture_output=True)
+                    
+                    # 再次尝试寻找
+                    for i in range(32):
+                        dev = f"/dev/nbd{i}"
+                        if os.path.exists(dev):
+                            check_res = subprocess.run(['nbd-client', '-check', dev], capture_output=True)
+                            mount_check = subprocess.run(['mount'], capture_output=True, text=True)
+                            if check_res.returncode != 0 and dev not in mount_check.stdout:
+                                nbd_dev = dev
+                                break
+                
+                if not nbd_dev: raise Exception("没有可用的 NBD 设备 (0-31 号设备均被占用或无法释放)")
                 
                 inst.nbd_device = nbd_dev
                 inst.startup_progress = 45
@@ -470,12 +512,35 @@ def do_mount(inst: DiskInstance):
             if not bm._remote_dirs_checked:
                  raise Exception("云端扫描超时未完成，无法确认磁盘状态。为防止数据丢失，已终止操作。")
                  
-            # 4. 终极防线：如果扫描结果为空，但云端存在 config.json，说明这可能是一个旧磁盘，严禁格式化
+            # 4. 终极防线：如果扫描结果为空，但云端存在配置文件，说明这可能是一个旧磁盘，严禁格式化
             try:
-                # 注意：这里需要确保路径正确，bm.remote_path 通常是 v_disks/computer/disk
-                config_check_path = f"{bm.remote_path}/config.json"
-                if bm.client.exists(config_check_path):
-                     raise Exception("严重警告：检测到云端存在配置文件(config.json)，但未扫描到任何数据块。这极可能是网络导致的扫描不完整。为防止数据被清空，系统已自动拦截格式化操作。请尝试重启应用或联系开发者。")
+                # 同时检查 config.json 和 block_index.json
+                config_path = f"{bm.remote_path}/config.json"
+                index_path = f"{bm.remote_path}/block_index.json"
+                
+                has_config = bm.client.exists(config_path)
+                has_index = bm.client.exists(index_path)
+                
+                # 如果有 index，检查它是否真的为空
+                index_is_empty = True
+                if has_index:
+                    try:
+                        import io
+                        bio = io.BytesIO()
+                        bm.client.download_fileobj(index_path, bio)
+                        index_data = json.loads(bio.getvalue().decode())
+                        if index_data and len(index_data) > 0:
+                            index_is_empty = False
+                    except:
+                        pass
+                
+                # 只有当 (有 config) 或者 (有非空 index) 时，才拦截
+                if has_config or not index_is_empty:
+                     # 允许一种特例：如果 index 明确是空的，且没有 config.json，则视为新盘
+                     if has_config:
+                         raise Exception("严重警告：检测到云端存在配置文件(config.json)，但未扫描到任何数据块。这极可能是网络导致的扫描不完整。为防止数据被清空，系统已自动拦截格式化操作。请尝试重启应用或联系开发者。")
+                     elif not index_is_empty:
+                         raise Exception("严重警告：检测到云端存在非空索引文件，但未扫描到对应的数据块。这极可能是网络导致的扫描不完整。为防止数据被清空，系统已自动拦截格式化操作。")
             except Exception as e:
                 # 如果是上面抛出的异常，直接向上抛
                 if "严重警告" in str(e): raise e
@@ -558,6 +623,9 @@ def do_mount(inst: DiskInstance):
         inst.startup_progress = 100
         inst.status = "running"
         logger.info(f"Disk {cfg.disk_name} started in {cfg.driver_mode} mode")
+
+        # 挂载成功后，同步配置到云端
+        threading.Thread(target=sync_config_to_webdav_task, args=(cfg,), daemon=True).start()
         
         # 启动后台扩容任务（如果是快速格式化）
         if locals().get('is_fast_format', False):
@@ -997,8 +1065,27 @@ async def list_webdav_disks(req: Request):
                 full_name = item['name'].strip('/')
                 disk_name = full_name.split('/')[-1]
                 if disk_name:
-                    has_config = client.exists(f"{path}/{disk_name}/config.json")
-                    disks_info.append({"name": disk_name, "has_config": has_config})
+                    # 增强检查：除了 config.json，还检查 block_index*.json
+                    # 这能帮助用户发现那些“配置丢了但数据还在”的孤儿盘
+                    disk_path = f"{path}/{disk_name}"
+                    has_config = False
+                    has_index = False
+                    
+                    try:
+                        disk_files = client.ls(disk_path, detail=False)
+                        for f in disk_files:
+                            fname = os.path.basename(f)
+                            if fname == "config.json":
+                                has_config = True
+                            elif fname.startswith("block_index") and fname.endswith(".json") and "tmp" not in fname:
+                                has_index = True
+                    except: pass
+                    
+                    disks_info.append({
+                        "name": disk_name, 
+                        "has_config": has_config,
+                        "has_index": has_index
+                    })
         
         logger.info(f"WebDAV disks found for {computer_name}: {disks_info}")
         return disks_info
@@ -1154,27 +1241,13 @@ async def mount_drive(config: MountConfig):
         configs.append(config.model_dump())
     save_configs(configs)
 
-    # 异步同步配置到云端 WebDAV (config.json)
-    # 不再阻塞主线程，改为后台执行
-    threading.Thread(target=sync_config_to_webdav_task, args=(config,), daemon=True).start()
-    
-    sync_status = "pending"
-    sync_msg = f"配置已保存，正在后台同步至云端: {config.remote_path.strip('/')}/config.json"
-
-    if instance.status == "running":
-        return {
-            "message": f"磁盘 {config.disk_name} 配置已更新（部分改动需重启生效）",
-            "sync_status": sync_status,
-            "sync_msg": sync_msg
-        }
-
     # 异步执行挂载逻辑
     threading.Thread(target=do_mount, args=(instance,), daemon=True).start()
     
     return {
         "message": f"磁盘 {config.disk_name} 挂载任务已启动",
-        "sync_status": sync_status,
-        "sync_msg": sync_msg
+        "sync_status": "pending",
+        "sync_msg": "挂载完成后将同步配置到云端"
     }
 
 @app.post("/unmount/{disk_name}")

@@ -1377,24 +1377,36 @@
                         disks.forEach(diskObj => {
                              const disk = diskObj.name;
                              const hasConfig = diskObj.has_config;
+                             const hasIndex = diskObj.has_index;
+                             
                              const item = document.createElement('div');
                              item.className = 'flex items-center justify-between p-2 bg-slate-50 rounded border border-slate-100 text-sm';
+                             
+                             let statusHtml = '';
+                             let canAutoRestore = false;
+                             
+                             if (hasConfig) {
+                                 statusHtml = `<span class="text-[10px] text-green-600 font-bold ml-6"><i class="fas fa-check-circle mr-1"></i>配置完好 (可全量恢复)</span>`;
+                                 canAutoRestore = true;
+                             } else if (hasIndex) {
+                                 statusHtml = `<span class="text-[10px] text-blue-600 font-bold ml-6"><i class="fas fa-database mr-1"></i>仅有数据索引 (配置缺失)</span>`;
+                             } else {
+                                 statusHtml = `<span class="text-[10px] text-amber-600 ml-6"><i class="fas fa-exclamation-triangle mr-1"></i>仅有数据文件夹 (配置与索引缺失)</span>`;
+                             }
+                             
                              item.innerHTML = `
                                  <div class="flex flex-col">
                                      <span class="font-medium text-slate-700"><i class="fas fa-hdd mr-2 text-slate-400"></i>${disk}</span>
-                                     ${hasConfig ? 
-                                         `<span class="text-[10px] text-green-600 font-bold ml-6"><i class="fas fa-file-code mr-1"></i>检测到云端配置 (可全量恢复)</span>` : 
-                                         `<span class="text-[10px] text-amber-600 ml-6"><i class="fas fa-folder-open mr-1"></i>仅检测到数据文件夹</span>`
-                                     }
+                                     ${statusHtml}
                                  </div>
                                  <div class="flex gap-2">
-                                     ${hasConfig ? 
+                                     ${canAutoRestore ? 
                                          `<button onclick="prefillDiskRestore('${disk}', true)" class="bg-green-600 text-white px-3 py-1 rounded text-xs font-bold hover:bg-green-700 transition">
                                              立即恢复
                                          </button>` : ''
                                      }
                                      <button onclick="prefillDiskRestore('${disk}', false)" class="bg-blue-600 text-white px-3 py-1 rounded text-xs font-bold hover:bg-blue-700 transition">
-                                         ${hasConfig ? '查看参数' : '手动恢复'}
+                                         ${canAutoRestore ? '查看参数' : '手动挂载'}
                                      </button>
                                  </div>
                              `;
